@@ -1,0 +1,407 @@
+---
+author: Jim Downie
+title: 3-level occupancy model for single-gene community profiling studies
+date: "07/07/2023"
+engine: knitr
+project:
+  execute-dir: project
+editor: 
+  markdown: 
+    wrap: 72
+bibliography: references.bib
+format:
+  html:
+    embed-resources: true
+---
+
+## Single-gene community profiling
+
+Single-gene community profiling, also known as 'metabarcoding', is a
+method in molecular biology to profile communities using DNA sequencing,
+particularly microbial communities where isolation and morphological
+distinction is difficult or impossible. As the name suggests, the method
+involves sequencing a single gene, gene fragment, or 'barcode', that is
+known to exist in all target taxa of interest, and then counting the
+number of DNA sequences arising from each taxon. Detailed specifics are
+beyond this brief blurb, but a brief overview of the method follows:
+
+1.  A sample is collected from the environment of interest, usually in
+    the range of 50 - 200 mg biomass.
+2.  DNA is extracted from the sample using mechanical and chemical
+    processes.
+3.  As the target gene or barcode is just a small part of the total DNA
+    extracted, the target is amplified using PCR with primers specific
+    to the target region of interest.
+4.  After all samples have been extracted and amplified, they are
+    combined into equimolar pools called 'libraries' and sequenced.
+5.  The resulting DNA sequencing data is run through a DNA processing
+    pipeline (e.g. @straub2020), resulting in a count matrix (sample by
+    taxon).
+
+At each stage above, there are potentials for bias, which can compound
+through each step. First, in the during sample collection, biomass is
+subsampled from the environment, producing a sample that may not
+perfectly represent the environment in question, due to small-scale
+variation in microbial community composition. Then, the DNA extraction
+process itself is lossy, and may bias towards certain taxa over others
+as the processing method may be more likely to break open the cells of
+some species over others. Third, the PCR uses a small volume of template
+DNA in the reaction - there is a chance that rare sequences are not
+taken up, biasing the resulting sample by losing taxa. Additionally, the
+PCR reaction itself can be biased towards certain DNA sequences,
+particularly those that are most similar to the primers used.
+
+Because each stage results from a subsampling of the previous stage, and
+because sequencing process only sequences a given number of DNA
+molecules (often 10,000 - 40,000 depending on the exact experimental
+setup), the final count matrix only represents relative abundance. Thus,
+additional caveats about relative abundance or proportional data apply -
+for example, a taxon may increase in relative abundance due to the
+dropout of a different species, rather than any increase in its absolute
+abundance.
+
+Thus, like other sampling methods, profiling communities with this
+approach is likely to result in a biased picture of sample composition,
+due to the likelihood of non-detection, which may be compounded at the
+sampling, extraction, and PCR stages. However, with an appropriate study
+design, it may be possible to overcome some of these biases using
+occupancy models, which allow the effects of detection and occupancy to
+be separated.
+
+## The model
+
+@fukaya2022 offer a 3-level occupancy model to tackle single-gene
+community profiling data. They consider the number of reads $y_{ijk}$ of
+species $i$, at site $j$ in replicate $k$, as arising from a multinomial
+distribution with $N_k$ equal to the total number of sequences across
+all species in the sample. They model the proportion of reads $p_{ijk}$
+as arising from a function of latent indicator variables $u_{ijk}$
+defining whether the species is present in the replicate, and $r_{ijk}$,
+which defines the relative sequence dominance of a species within the
+sample, conditional on its presence:
+
+$$
+\begin{align}
+y_{ijk} &\sim \text{Multinomial}(N_{k}, p_{ijk}) \\
+p_{ijk} &= \frac{u_{ijk}r_{ijk}}{\sum_{m=1}^I u_{mjk}r_{mjk}}
+\end{align}
+$$
+
+Unfortunately, due to the large number of latent indicator variables,
+this model is intractable to fit in Stan due to combinatorial
+explosion - these studies often identify thousands of taxa, and the
+number of different combinations resulting from marginalising all the
+latent variables is $2^I$, for $I$ total species.
+
+However, we can reduce the number of latent variables in the model using
+a Negative binomial distribution, considering the probability that a
+sequence belongs to a species vs. not belonging to a species, we can
+collapse the above equation to a single $u_{ijk}\lambda_{ijk}$, where
+$u_{ijk}$ is 1 if the species is in the sample, and 0 otherwise, and
+$\lambda_{ijk}$ is rate at which we encounter reads belonging to this
+species conditional on its presence in the sample. The Negative binomial
+allows us to account for the variability in the number of reads
+resulting from the dropout of other species, through its overdispersion
+parameter $\phi_i$:
+
+$$
+\begin{align}
+y_{ijk} &\sim \textrm{Negative binomial}(N_{k}, u_{ijk}p_{ijk}, \phi_{i}) \\
+p_{ijk} &= f(X_{reads_{jk}}\beta_{reads_{i}}) \\
+u_{ijk} &\sim \textrm{Bernoulli}(z_{ij}\theta_{ijk}) \\
+\theta_{ijk} &= f(X_{rep_{jk}}\beta_{rep_{i}}) \\
+z_{ij} &\sim \textrm{Bernoulli}(\psi_{ij}) \\
+\psi_{ij} &= f(X_{occ_j}\beta_{occ_{i}})
+\end{align}
+$$
+
+Subsequently, the rest of the model follows that of @fukaya2022:
+$\theta_{ijk}$ is the probability species $i$ is included in a given
+replicate $k$, conditional on its presence at the site, $z_{ij}$,
+another latent indicator variable, goverened by the species occupancy
+parameter $\psi_{ij}$. To parameterise the model further, we define $f$
+as some link function that allow covariates ($X_{occ}$, $X_{rep}$,
+$X_{reads}$) at the site and replicate level to inform these
+probabilities using coefficients ($\beta_{occ}$, $\beta_{rep}$, and
+$\beta_{reads}$) while remaining in the interval $[0, 1]$.
+
+## Parameter interpretations
+
+There are three 'main' parameters in the model which govern the
+occupancy and detection of species: $p_{ijk}$, $\theta_{ijk}$, and
+$\psi_{ij}$, which can be 'sub-parameterised' with additional models as
+required.
+
+-   $\psi_{ij}$ is the probability that site $j$ is occupied by species
+    $i$. This could be modelled as a function of site-specific
+    environmental covariates, species traits, or interactions between
+    species.
+
+-   $\theta_{ijk}$ is the probability of finding at least one DNA
+    sequence of species $i$ in sample $k$, conditional on the species'
+    presence at the site. This could be a function of sample-specific
+    environmental covariates, as well as technical covariates such as
+    the amount of biomass processed relative to the size of the unit
+    being sampled.
+
+-   $\lambda_{ijk}$ is the probability that a sequenced DNA molecule in
+    library $k$ belongs to species $i$, conditional on the presence of
+    species $i$ at both the site and in the sample, and is thus a
+    measure of relative abundance. This might be a function of site- and
+    replicate-level environmental covariates, as well as technical
+    factors such as biases in PCR amplification resulting from sequence
+    mismatches to the primers used.
+
+## Marginalising the model
+
+As Stan cannot handle the latent discrete parameters $u_{ijk}$ and
+$z_{ij}$, we must first marginalise these out of the model (add up each
+possible state) in order to estimate it in Stan. I will use bracket
+notation to stand in for the actual probability distributions to make
+the maths a bit clearer. First, I write out the formula for the joint
+distribution. For k...K replicates at a single site, dropping species
+index $i$ for clarity at the moment:
+
+$$
+[y_{1:K}, u_{1:K}, z, p_{k}, \theta_{k}, \psi] = \prod_{k = 1}^{K} [y_k \mid p_k, u_k][u_k \mid \theta_k, z] \times [z \mid \psi][p, \psi, \theta]
+$$
+
+We then need to marginalise out the latent variables.
+
+$$
+\begin{align}
+[y_{k} \mid \theta_{k}, \psi] &= \sum_{z = 0}^1 \prod_{k = 1}^{K} \sum_{u_{k} = 0}^1 [y_k \mid p_k, u_k][u_k \mid \theta_k, z] \times [z \mid \psi]
+\end{align}
+$$
+
+Starting from the outer sum, and then working in:
+
+$$
+\begin{align}
+[y_{k} \mid \theta_{k}, \psi] &= \prod_{k = 1}^{K} \sum_{u_{k} = 0}^1 [y_k \mid p_k, u_k][u_k \mid \theta_k, z = 1] \times [z = 1\mid \psi] + \prod_{k = 1}^{K} \sum_{u_{k} = 0}^1 [y_k \mid p_k, u_k][u_k \mid \theta_k, z = 0] \times [z = 0\mid \psi] \\
+&= \prod_{k = 1}^{K} \left([y_k \mid p_k, u_k = 1][u_k = 1 \mid \theta_k, z = 1] \times [z = 1\mid \psi] + [y_k \mid p_k, u_k = 0][u_k = 0 \mid \theta_k, z = 1] \times [z = 1\mid \psi] \right) + \\
+&\hspace{1.2em} \prod_{k = 1}^{K} \left([y_k \mid p_k, u_k = 1][u_k = 1 \mid \theta_k, z = 0] \times [z = 0\mid \psi] + [y_k \mid p_k, u_k = 0][u_k = 0 \mid \theta_k, z = 0] \times [z = 0\mid \psi] \right)
+\end{align}
+$$
+
+Simplifying:
+
+$$
+\begin{align}
+[y_{k} \mid \theta_{k}, \psi] &= \prod_{k = 1}^{K} \left([y_k \mid p_k, u_k = 1]\theta_k\psi + (1 - \theta_k) \psi \right) + (1 - \psi) \\
+&= \psi \left( \prod_{k = 1}^{K} [y_k \mid p_k, u_k = 1]\theta_k + (1 - \theta_k) \right) + (1 - \psi)
+\end{align}
+$$
+
+And adding back in missing indices:
+
+$$
+\begin{align}
+[\mathbf{y}_{ij} \mid \theta_{ik}, \psi_{ij}] &= \psi_{ij} \left( \prod_{k = 1}^{K} [y_{ijk} \mid p_{ijk}, u_{ijk} = 1]\theta_{ijk} + (1 - \theta_{ijk}) \right) + (1 - \psi_{ij})
+\end{align}
+$$
+
+We can simplify this further. Let $Q_{ij}$ = 1 if any
+$\mathbf{y}_{ijk} > 0$, and 0 otherwise. Then, let $R_{ijk}$ = 1 if
+$Q_{ij} = 1$ and $y_{ijk} > 0$, and 0 otherwise. We can then say:
+
+$$
+\begin{align}
+[\mathbf{y}_{ij} \mid \theta_{ik}, \psi_{ij}] &= \psi_{ij} \left( \prod_{k = 1}^{K} [y_{ijk} \mid p_{ijk}, u_{ijk} = 1]\theta_{ijk} + (1 - \theta_{ijk})I(R_{ijk} = 0)I(Q_{ij} = 1) \right) + (1 - \psi_{ij})I(Q_{ij} = 0)
+\end{align}
+$$
+
+Or more simply:
+
+$$
+[y_{ijk} \mid \psi_{ij}, \theta_{ijk}, \beta_i, \delta_i, \alpha_i, \phi_i] = 
+\begin{cases}
+\psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk})I(R_{ijk} = 0) \right)&\text{if } Q_{ijk} = 1 &\\
+\psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk}) \right) + (1 - \psi_{ij}) &\text{if } Q_{ijk} = 0 
+\end{cases}
+$$
+
+## Log-scale
+
+Let's express the above model on the log-probability scale, to
+facilitate implementing it in Stan:
+
+$$
+\begin{align}
+\log [y_{ijk} \mid \psi_{ij}, \theta_{ijk}, \beta_i, \delta_i, \alpha_i, \phi_i] &= 
+\begin{cases}
+\log \left( \psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk})I(R_{ijk} = 0) \right)\right) &\text{if } Q_{ijk} = 1 &\\
+\log \left( \psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk}) \right) + (1 - \psi_{ij}) \right) &\text{if } Q_{ijk} = 0 
+\end{cases} \\\\
+&= \begin{cases}
+\log \psi_{ij} + \\ 
+\hspace{1.2em}\sum_{k = 1}^{K} (\textrm{log_sum_exp}(\log\theta_{ijk} + \log[y_{ijk} \mid p_{ijk}, u_{ijk} = 1], \\
+\hspace{1.2em}\hspace{1.2em}\log(1 - \theta_{ijk})I(R_{ijk} = 0))) &\text{if } Q_{ijk} = 1 &\\
+&&\\
+\textrm{log_sum_exp}(\log\psi_{ij} + \\
+\hspace{1.2em}\sum_{k = 1}^{K} \textrm{log_sum_exp}(\log\theta_{ijk} + \log [y_{ijk} \mid p_{ijk}, u_{ijk} = 1], \log (1 - \theta_{ijk})), \\
+\hspace{1.2em} \log(1 - \psi_{ij})) &\text{if } Q_{ijk} = 0 &\\
+\end{cases}
+\end{align}
+$$
+
+## Writing the likelihood in Stan
+
+Thus, we can write the likelihood in Stan, for a single species $i$ with
+constant $\theta_{ijk}$ and $\psi_{ij}$, as:
+
+```{stan}
+#| output.var: 'priors'
+#| eval: FALSE
+#| tidy: FALSE
+functions {
+  real sample_detection_lpmf(int Y, int N, real p, real theta, real phi){
+
+  return log(theta) +
+    neg_binomial_2_log_lpmf(Y | N, p, phi);
+  }
+  
+  real sample_nondetection_lpmf(int Y, int N, real p, real theta, real phi) {
+    
+    return log_sum_exp(
+      sample_detection_lpmf(Y | N, theta, p, phi), log1m(theta));
+  }
+  
+  real sample_occupancy_sum_lpmf(array[,] Y, p, theta, phi) {
+    K = size(Y);
+    
+    temp_target = 0;
+    
+    for(k in 1:K) {
+      if(Y[k, 1] > 0) {
+        temp_target += sample_detection_lpmf(Y[k, 1] | Y[k, 2], p, theta, phi);
+      } else {
+        temp_target += sample_nondetection_lpmf(0 | Y[k, 2], p, theta, phi);
+      }
+    }
+    
+    return(temp_target);
+  }
+}
+data{
+  int N_sites;
+  int N_replicates;
+  array[N_replicates, 4] int Y; // Y, N, R, Site
+  array[N_sites] int Q; 
+}
+parameters {
+  real<lower=0, upper=1> p;
+  real<lower=0, upper=1> psi;
+  real<lower=0, upper=1> theta;
+  real<lower=0> phi;
+}
+model {
+  for(j in 1:N_sites) {
+    if(Q[j] == 1) {
+      target += log(psi) + 
+          sample_occupancy_sum_lpmf(Y[,Y[,4] == j] | p, theta, phi);
+    }
+    if(Q[j] == 0) {
+      target += log_sum_exp(log(psi) + 
+          sample_occupancy_sum_lpmf(Y[,Y[,4] == j] | p, theta, phi),
+          log1m(psi));
+    } 
+  }
+}
+
+```
+
+## Posterior distribution of latent discrete quantities
+
+In many cases, it might be desirable to calculate the posterior
+distribution of the latent discrete probabilities $z_{ij}$ and $u_{ijk}$
+of the sampling units used in the model. It is important to recognise
+that for some data points, the value of these parameters are known
+a-priori - as we assume no false detections, sites with at least 1
+detection have $z_{ij} = 1$ with probability 1, for example. For sites
+without a confirmed detection, however, the probability we need to
+calculate is not simply the unconditional probability of occupancy
+($\psi_{ij}$), but the probability $P(Z = 1 \mid \textbf{y} = 0)$. Using
+Bayes theorem, for a standard two-level occupancy model with a fixed
+per-site detection probability (indexing $I$ sites with $J$ replicate
+observations per site):
+
+$$
+P(z_{i} = 1 \mid \mathbf{y} = 0) = \frac{P(\textbf{y} = 0 \mid z_{i} = 1)Pr(z_i = 1)}{P(\mathbf{y} = 0)}
+$$
+
+Noting:
+
+$$
+P(\textbf{y} = 0 \mid z_{i} = 1) = (1 - \theta_{ij})^J
+$$
+
+and
+
+$$
+\begin{align}
+P(\mathbf{y} = 0) &= \sum_{Z = 0}^1 P(\mathbf{y} = 0 | z_i = Z) P(z_i = Z) \\
+&= P(\mathbf{y} = 0 | z_i = 0) P(z_j = 0) + P(\mathbf{y} = 0 | z_i = 1) P(z_i = 1) \\
+&= (1 - \psi_i) + \psi_i (1 - \theta_{ij})^J
+\end{align}
+$$
+
+then:
+
+$$
+P(z_{i} = 1 \mid \mathbf{y} = 0) = \begin{cases} 1 &if Q_i = 1 \\
+\frac{\psi_i (1 - \theta_{ij})^{J}}{(1 - \psi_i) + \psi_i (1 - \theta_{ij})^J} & if Q_i = 0
+\end{cases}
+$$
+
+Following the same logic, we can calculate the posterior probabilities
+of $z_{ij}$ and $u_{ijk}$ for our three-level model. For $Q_{ij} = 1$,
+we know that the site is occupied ($z_{ij} = 1$). For any replicate $m$,
+If $R_{ijm} = 1$ as well, then we also know that $u_{ijm} = 1$. However,
+if $y_{ijm} = 0$, then we need to estimate $u_{ijm}$ as the following:
+
+$$
+\begin{align}
+P(u_{ijm} = 1 \mid y_{ijm} = 0, z_{ij} = 1) &= \frac{P(y_{ijm}= 0 \mid u_{ijm} = 1, z_{ij} = 1)P(u_{ijm}=1 \mid z_{ij} = 1)}{P(y_{ijm}=0 \mid z_{ij} = 1)} \\\\
+&= \frac{\theta_{ijm}\cdot\textrm{neg_binomial_2_lpmf}(0 \mid N_{ijm}, p_{ijm}, \phi_i)}{\sum_{u_{ijm}=0}^1 P(y_{ijm}=0 \mid z_{ij} = 1)} \\\\
+&= \frac{\theta_{ijm}\cdot\textrm{neg_binomial_2_lpmf}(0 \mid N_{ijm}, p_{ijm}, \phi_i)}{ P(y_{ijm}=0 \mid u_{ijm} = 0, z_{ij} = 1)P(u_{ijm} = 0 \mid z_{ij} = 1) + \\ P(y_{ijm}=0 \mid u_{ijm} = 1, z_{ij} = 1)P(u_{ijm} = 1 \mid z_{ij} = 1)} \\\\
+&= \frac{\theta_{ijm}\cdot\textrm{neg_binomial_2_lpmf}(0 \mid N_{ijm}, p_{ijm}, \phi_i)}{(1 - \theta_{ijm}) + \theta_{ijm}\cdot\textrm{neg_binomial_2_lpmf}(0 \mid N_{ijm}, p_{ijm}, \phi_i)} \\\\
+\end{align}
+$$
+
+For sites where $Q_{ij} = 0$, we will need to estimate both $z_{ij}$ and
+$u_{ijm}$. For the probability that $z_{ij} = 1$, using the three
+variable Bayes' formula:
+
+$$
+\begin{align}
+P(z_{ij} = 1 \mid \mathbf{y}_{ij} = 0, \mathbf{u}_{ij}) &= 
+\frac{P(\mathbf{y}_{ij}= 0 \mid \mathbf{u}_{ij}, z_{ij} = 1)P(z_{ij} = 1 \mid \mathbf{u}_{ij})}{P(\mathbf{y}_{ij} = 0 \mid \mathbf{u}_{ij})} \\\\
+&= \frac{P(\mathbf{y}_{ij}= 0 \mid \mathbf{u}_{ij}, z_{ij} = 1)P(\mathbf{u}_{ij} \mid z_{ij} = 1)P(z_{ij} = 1)}{P(\mathbf{y}_{ij} = 0 \mid \mathbf{u}_{ij})P(\mathbf{u}_{ij})} \\\\
+&= \frac{\psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk}) \right)}{\psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk}) \right) + (1 - \psi_{ij}) }
+\end{align}
+$$
+
+Similarly for $P(z_{ij} = 0)$:
+
+$$
+\begin{align}
+P(z_{ij} = 0 \mid \mathbf{y}_{ij} = 0, \mathbf{u}_{ij}) &= 
+\frac{P(\mathbf{y}_{ij}= 0 \mid \mathbf{u}_{ij}, z_{ij} = 0)P(z_{ij} = 0 \mid \mathbf{u}_{ij})}{P(\mathbf{y}_{ij} \mid \mathbf{u}_{ij})} \\\\
+&= \frac{P(\mathbf{y}_{ij}= 0 \mid \mathbf{u}_{ij}, z_{ij} = 0)P(\mathbf{u}_{ij} \mid z_{ij} = 0)P(z_{ij} = 0)}{P(\mathbf{y}_{ij} \mid \mathbf{u}_{ij})P(\mathbf{u}_{ij})} \\\\
+&= \frac{\prod_{k=1}^{K}(1 - \theta_{ijk})\cdot(1 - \psi_{ij})}{\psi_{ij} \left( \prod_{k = 1}^{K} \theta_{ijk}[y_{ijk} \mid p_{ijk}, u_{ijk} = 1] + (1 - \theta_{ijk}) \right) + (1 - \psi_{ij}) }
+\end{align}
+$$
+
+Finally, we want to know the probability that some replicate
+$u_{ijm} = 1$, given that we have observed all zeroes at this site. This
+could easily get unwieldy, so let's be careful!
+
+$$ \begin{align}
+P(u_{ijm} = 1 \mid \mathbf{y}_{ijk, k \neq m} = 0, y_{ijm} = 0, \mathbf{u}_{ijk,k\neq m}, z_{ij}) &= \frac{P(y_{ijm} = 0 \mid u_{ijm} = 1, \mathbf{y}_{ijk, k \neq m}  = 0, \mathbf{u}_{ijk, k \neq m}, z_{ij})\cdot\\P(u_{ijm} = 1, \mathbf{y}_{ijk, k \neq m}  = 0, \mathbf{u}_{ijk, k \neq m}, z_{ij})}{P(\mathbf{y}_{ijk, k \neq m} = 0, y_{ijm} =0, \mathbf{u}_{ijk,k\neq m}, z_{ij})} \\\\
+&= \frac{P(y_{ijm} = 0 \mid u_{ijm} = 1, \mathbf{y}_{ijk, k \neq m} = 0, \mathbf{u}_{ijk, k \neq m}, z_{ij})\cdot\\P(u_{ijm} = 1 \mid \mathbf{y}_{ijk, k \neq m} = 0, \mathbf{u}_{ijk, k \neq m}, z_{ij})\cdot\\P(\mathbf{y}_{ijk, k \neq m} = 0 \mid \mathbf{u}_{ijk, k \neq m} , z_{ij})\cdot\\P(\mathbf{u}_{ijk, k \neq m} = 0 \mid z_{ij})\cdot\\P(z_{ij})}{P(\mathbf{y}_{ijk} = 0, \mathbf{u}_{ijk}, z_{ij})} \\\\
+&= \frac{P(y_{ijm} = 0 \mid u_{ijm} = 1, \mathbf{y}_{ijk, k \neq m} = 0, \mathbf{u}_{ijk, k \neq m}, z_{ij} = 1)\cdot\\P(u_{ijm} = 1 \mid \mathbf{y}_{ijk, k \neq m} = 0, \mathbf{u}_{ijk, k \neq m}, z_{ij} = 1)\cdot\\P(\mathbf{y}_{ijk, k \neq m} = 0 \mid \mathbf{u}_{ijk, k \neq m}, z_{ij} = 1)\cdot\\P(\mathbf{u}_{ijk, k \neq m} = 0 \mid z_{ij} = 1)}{\prod_{k = 1}^{K} P(y_{ijk} = 0 \mid u_{ijk}, z_{ij})P(u_{ijk} \mid z_{ij})} \\\\
+&= \frac{P(y_{ijm} = 0 \mid u_{ijm} = 1, z_{ij} = 1)\cdot\\P(u_{ijm} = 1 \mid z_{ij} = 1)\cdot\\P(\mathbf{y}_{ijk, k \neq m} = 0 \mid \mathbf{u}_{ijk, k \neq m}, z_{ij} = 1)\cdot\\P(\mathbf{u}_{ijk, k \neq m} = 0 \mid z_{ij} = 1)}{\prod_{k = 1}^{K} P(y_{ijk} = 0 \mid u_{ijk} = 1, z_{ij} = 1)P(u_{ijk} = 1 \mid z_{ij} = 1) + \\P(y_{ijk} = 0 \mid u_{ijk} = 0, z_{ij} = 1)P(u_{ijk} = 0 \mid z_{ij} = 1) + \\P(y_{ijk} = 0 \mid u_{ijk} = 1, z_{ij} = 0)P(u_{ijk} = 1 \mid z_{ij} = 0) + \\P(y_{ijk} = 0 \mid u_{ijk} = 0, z_{ij} = 0)P(u_{ijk} = 0 \mid z_{ij} = 0)} \\\\
+&= \frac{\theta_{ijm}\cdot[y_{ijm} = 0 \mid u_{ijm} = 1, z_{ij} = 1] \cdot \\\prod_{k=1,k \neq m}^{K} \theta_{ijk} \cdot [y_{ijm} = 0 \mid u_{ijm} = 1, z_{ij} = 1] + (1 - \theta_{ijk})}{\prod_{k = 1}^{K} [y_{ijk} = 0 \mid u_{ijk} = 1, z_{ij} = 1] \theta_{ijk} + (1 - \theta_{ijk}) + 1}
+\end{align} 
+$$

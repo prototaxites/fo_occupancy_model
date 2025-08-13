@@ -1,0 +1,15 @@
+renv/library
+_targets/
+*.Rproj
+.Rproj.user/
+.cmdstan/
+.DS_Store
+.gitignore.swp
+*.e
+*.o
+tmp/
+fo_amplicons_latest.sif
+maps/
+results
+/.quarto/
+.future/

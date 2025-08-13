@@ -1,0 +1,280 @@
+---
+title: "Model predictions"
+format:
+    html:
+        embed-resources: true
+editor: visual
+project:
+  execute_dir: project
+params:
+  marker: "ITS"
+  tissue: "Leaf"
+---
+
+```{r}
+#| echo: false
+#| include: false
+library(targets)
+library(tidyverse)
+library(sf)
+library(microViz)
+library(patchwork)
+library(phyloseq)
+library(posterior)
+library(cmdstanr)
+library(ggdist)
+library(patchwork)
+source("R/model_plots.R")
+```
+
+Load the model and data:
+
+```{r}
+model_draws <- tar_read_raw(glue::glue("model_draws_{params$marker}_{params$tissue}")) |> 
+  as_draws_rvars()
+model_postpreds <- tar_read_raw(glue::glue("model_postpreds_{params$marker}_{params$tissue}")) |> 
+  as_draws_rvars()
+asv_table <- tar_read_raw(glue::glue("asv_table_{params$marker}_{params$tissue}"))
+phylo <- tar_read_raw(glue::glue("microbiome_tj_corrected_{params$marker}_{params$tissue}"))
+
+site <- tar_read(site_df) |> 
+  mutate(Site_ID = 1:n())
+
+tree <- tar_read(tree_df)|> 
+  arrange(Site, Tree) |> 
+  mutate(Tree_ID = 1:n()) |> 
+  mutate(Disease = case_when(
+                   str_detect(Tree, "C") ~ 0,
+                   str_detect(Tree, "A") ~ 1,
+                   str_detect(Tree, "E") ~ 2,
+                   .default = NA
+                 )
+         )
+```
+
+## Alpha diversity
+
+### Site-level
+
+```{r}
+#| echo: false
+phylo_richness <- phylo |> 
+  ps_select(Site, Tree) |> 
+  psmelt() |> 
+  left_join(site) |> 
+  arrange(OTU, Site) |> 
+  mutate(Ntrees = ifelse(AODProx == "AOD", 20, 5),
+         SamplingDepth = sum(Abundance) / Ntrees,
+         .by = c(Site)) |> 
+  summarise(Richness = ifelse(sum(Abundance) > 0, 1, 0), 
+            .by = c(Site, SamplingDepth, OTU)) |> 
+  summarise(Richness_raw = sum(Richness), .by = c(Site, SamplingDepth)) |> 
+  mutate(Site_num = as.character(1:n()))
+  
+site_richness <- model_postpreds |> 
+  pluck("Z_cond") |> 
+  rvar_apply(1, rvar_sum) |> 
+  as_tibble() |> 
+  rename(Richness_pred = value) |> 
+  rownames_to_column("Site_num") |> 
+  left_join(phylo_richness) |> 
+  mutate(Site_num = as.numeric(Site_num),
+         Richness_diff = Richness_pred - Richness_raw) |> 
+  left_join(site)
+
+ggplot(site_richness) +
+  stat_pointinterval(aes(xdist = Richness_pred, 
+                         y = fct_reorder(as.factor(Site), Northing),
+                         colour = AODProx)) +
+  geom_point(aes(x = Richness_raw, 
+                 y = fct_reorder(as.factor(Site), Northing), 
+                 colour = AODProx),
+             shape = 4, size = 3) +
+  theme_bw() +
+  labs(x = "Species richness", y = "Site") + 
+  theme(legend.position = "none") + 
+  theme(axis.text = element_text(size = 14),
+        axis.title = element_text(size = 18))
+
+ggplot(site_richness) +
+  stat_pointinterval(aes(ydist = Richness_diff, 
+                         x = AODProx,
+                         colour = AODProx),
+                     position = position_dodge(width = 0.8)) +
+  # facet_grid(rows = vars(AODProx), scales = "free_y") +
+  theme_bw() +
+  labs(y = "Difference between measured and predicted richness", x = "Mean reads per sample at site") + 
+  theme(legend.position = "none")
+```
+
+### Sample-level
+
+```{r}
+#| echo: false
+phylo_sample_richness <- phylo |> 
+  ps_select(Site, Tree) |> 
+  psmelt() |> 
+  arrange(Site, Tree) |> 
+  summarise(Richness_data = sum(Abundance > 0), 
+            TotalReads = sum(Abundance),
+            .by = c(Sample, Site, Tree)) |> 
+  left_join(tree) |> 
+  left_join(site) |> 
+  mutate(Sample_num = 1:n())
+
+sample_richness <- model_postpreds |> 
+  pluck("U_cond") |> 
+  rvar_apply(1, rvar_sum) |> 
+  as_tibble() |> 
+  rename(Richness_pred = value) |> 
+  rownames_to_column("Sample_num") |> 
+  mutate(Sample_num = as.numeric(Sample_num)) |> 
+  left_join(phylo_sample_richness, by = "Sample_num") |> 
+  mutate(Richness_diff = Richness_pred - Richness_data)
+
+ggplot(sample_richness) +
+  stat_pointinterval(aes(ydist = Richness_diff, 
+                      x = TotalReads,
+                      colour = as.factor(AODProx))) +
+  scale_colour_discrete() +
+  theme_bw() +
+  labs(x = "Species richness", y = "Site", title = glue::glue("{params$tissue} {params$marker} ASVs"))
+```
+
+## Beta diversity
+
+### Ordination - DCA
+
+First: a visual comparison of community composition using ordination. To properly account for uncertainty in the outcome, we need to run an ordination over a whole drawset at once, and then do the posterior calculations afterwards, to ensure the scale is the same. Because of this, we will use DECORANA, as computing the distance matrix of a community matrix size ($40 \times 4000$) is computationally horrific.
+
+To simplify this process somewhat, there are currently only 40 possible site-tree combinations in the model, so we will subset the data to each possible Site-Disease combination.
+
+```{r}
+#| echo: false
+
+## subset data
+non_duplicates_df <- sample_data(phylo) |> 
+  as("data.frame") |> 
+  mutate(RowID = 1:n()) |> 
+  slice(1, .by = c(Site, Disease)) |> 
+  left_join(site)
+
+## get draws
+Y_norm <- model_postpreds |> 
+  pluck("Y_norm")
+
+## subset draws using indices of subset data
+Y_norm_nd <- Y_norm[non_duplicates_df$RowID,]
+
+## reshape array to matrix for ordination
+merged_Y_norm <- draws_of(Y_norm_nd) |> 
+  apply(1, \(x) x, simplify = FALSE) |> 
+  do.call("rbind", args = _)
+
+## run ordination and get scores
+bigdca <- vegan::decorana(merged_Y_norm)
+bigscores <- vegan::scores(bigdca)
+
+## reshape ordination scores back to array, convert to rvars
+bigscores_rvar <- bigscores |> 
+  array(dim = c(40, 4000, 2)) |> 
+  aperm(c(2, 1, 3)) |> 
+  rvar()
+
+## plot modelled ordination
+(model_ordination <- bigscores_rvar |> 
+  as.data.frame() |> 
+  bind_cols(non_duplicates_df) |> 
+  rowwise() |> 
+  mutate(mean_V1 = median(V1),
+         mean_V2 = median(V2),
+         lci_V1 = quantile(V1, probs = 0.975),
+         lci_V2 = quantile(V2, probs = 0.975),
+         uci_V1 = quantile(V1, probs = 0.025),
+         uci_V2 = quantile(V2, probs = 0.025)
+         ) |> 
+  ggplot(aes(x = mean_V1, 
+             y = mean_V2,
+             xmin = lci_V1, xmax = uci_V1,
+             ymin = lci_V2, ymax = uci_V2)
+         ) +
+  geom_errorbar(colour = "grey70") + 
+  geom_errorbarh(colour = "grey70") +
+  geom_point(aes(colour = AODProx), size = 3) +
+  # scale_color_viridis_c() +
+  labs(x = "DCA1", y = "DCA2") +
+  theme_bw())
+```
+
+## Occupancy predictor summaries
+
+### Environmental sigmas
+
+```{r}
+model_draws |> subset_draws("sigmas_occ") |> 
+  bayesplot::mcmc_dens()
+```
+
+### Disease sigmas
+
+```{r}
+model_draws |> subset_draws("sigmas_rep") |> 
+  bayesplot::mcmc_dens()
+```
+
+### Per-species AOD response
+
+```{r}
+intervals <- disease_intervals(model_draws, disease_col = 12)
+plot_disease_intervals(intervals)
+```
+
+```{r}
+filter(intervals, uci < 1) |> 
+  left_join(asv_table) |> 
+  arrange(median) |> 
+  select(Phylum, Genus, Species, median) |> 
+  mutate(median = round(median, digits = 2)) |> 
+  head(n = 10) |> 
+  gt::gt() |> 
+  gt::cols_label(
+    median = "Change in odds ratio"
+  )
+```
+
+## Occupancy slopes
+
+```{r}
+groundfrost <- plot_species_slopes(model_draws, site$groundfrost, 2, 2) + 
+  labs(x = "Mean annual days of groundfrost",
+       title = "Groundfrost")
+hurs <- plot_species_slopes(model_draws, site$hurs, 3, 3) + 
+  labs(x = "Mean annual relative humidity (%)",
+       title = "Humidity")
+pv <- plot_species_slopes(model_draws, site$pv, 4, 4) + 
+  labs(x = "Mean annual vapour pressure (hPa)",
+       title = "Vapour pressure")
+rainfall <- plot_species_slopes(model_draws, site$rainfall, 5, 5) + 
+  labs(x = "Mean annual rainfall (mm)",
+       title = "Rainfall")
+sfcWind <- plot_species_slopes(model_draws, site$sfcWind, 6, 6) + 
+  labs(x = "Mean annual wind speed (knots)",
+       title = "Windspeed")
+sun <- plot_species_slopes(model_draws, site$sun, 7, 7) + 
+  labs(x = "Duration of bright sunshine (hours)",
+       title = "Sunshine")
+tas <- plot_species_slopes(model_draws, site$tas, 8, 8) + 
+  labs(x = "Mean annual temperature (C)",
+       title = "Temperature")
+Ntot <- plot_species_slopes(model_draws, site$Ntot, 9, 9) + 
+  labs(x = "Mean annual N deposition (kg/ha/y)",
+       title = "Nitrogen deposition")
+SOx <- plot_species_slopes(model_draws, site$SOx, 10, 10) + 
+  labs(x = "Mean annual SOx deposition (kg/ha/y)",
+       title = "Sulphur deposition")
+CaMg <- plot_species_slopes(model_draws, site$CaMg, 11, 11) + 
+  labs(x = "Mean annual Ca/Mg deposition (kg/ha/y)",
+       title = "Ca/Mg deposition")
+
+groundfrost + hurs + pv + rainfall + sfcWind +sun + tas + Ntot+ SOx + CaMg + plot_layout(nrow = 2, axes = "collect_y") & labs(x = "") & coord_cartesian(y = c(0, 12))
+```

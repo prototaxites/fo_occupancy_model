@@ -1,0 +1,180 @@
+---
+author: Jim Downie
+title: Exploring differences in disease metrics between tree severity classes
+format: 
+  html:
+    fig-width: 12
+    fig-format: svg
+    embed-resources: true
+project:
+  execute-dir: project
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| include: false
+library(targets)
+library(tidyverse)
+library(brms)
+
+metadata <- tar_read(its_metadata_df) |>
+  left_join(tar_read(pheno_df)) |> 
+  left_join(tar_read(decline_df)) |> 
+  left_join(tar_read(tree_df)) |> 
+  filter(SampleOrigin == "Microbiome", Tissue == "Leaf", !is.na(active_bleeds_number)) |> 
+  mutate(Severity = factor(Severity, levels = c("Control", "Low", "Medium", "High", "COD")))
+
+theme_plots <- theme(legend.position = "bottom", legend.box = "vertical", 
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20, vjust = -0.1),
+        axis.text = element_text(size = 12),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 18),
+        strip.text.x = element_text(size = 14))
+```
+
+
+## PDI
+
+```{r}
+#| echo: false
+#| fig-height: 6
+
+ggplot(metadata, aes(x = PDI)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Phenotypic Decline Index", y = "Number of trees") +
+  theme_bw() + theme_plots
+```
+
+## DAI
+
+```{r}
+#| echo: false
+#| fig-height: 6
+
+ggplot(metadata, aes(x = DAI)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Decline Acuteness Index", y = "Number of trees") +
+  theme_bw() + theme_plots
+```
+
+## Bleeds
+
+```{r}
+#| echo: false
+#| fig-height: 6
+
+ggplot(metadata, aes(x = active_bleeds_number)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Number of active stem bleeds", y = "Number of trees") +
+  theme_bw() + theme_plots
+
+ggplot(metadata, aes(x = active_bleeds_length_mm)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Active stem bleed length (mm)", y = "Number of trees") +
+  theme_bw() + theme_plots
+```
+
+## Black staining
+
+```{r}
+#| echo: false
+#| fig-height: 6
+
+ggplot(metadata, aes(x = black_staining_number)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Number of active stem bleeds", y = "Number of trees") +
+  theme_bw() + theme_plots
+
+ggplot(metadata, aes(x = black_staining_length_mm)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Active stem bleed length (mm)", y = "Number of trees") +
+  theme_bw() + theme_plots
+```
+
+## Agrilus exit holes
+
+```{r}
+#| echo: false
+#| fig-height: 6
+
+ggplot(metadata, aes(x = agrillus_exit_holes)) +
+  geom_histogram(aes(fill = Severity), bins = 15) +
+  scale_fill_viridis_d(option = "C") +
+  facet_grid(cols = vars(Severity)) +
+  labs(x = "Number of Agrillus biguttatus exit holes", y = "Number of trees") +
+  theme_bw() + theme_plots
+```
+
+## Building a predictive model of PDI
+
+```{r}
+library(patchwork)
+
+data <- tar_read(tree_df) |> 
+  left_join(tar_read(site_df)) |> 
+  left_join(tar_read(decline_df)) |> 
+  mutate(across(c(PDI_unscaled, Elevation_1haAve, DD_11point5Deg_CLIMEX5km, groundfrost, hurs, psl, pv, rainfall, sfcWind, snowLying, sun, tas, tasmax, tasmin, Ntot, H, SOx, CaMg, Cl), \(x) scale(x)[,1], .names = "{.col}_scaled"))
+
+pairs(select(data, PDI, groundfrost, hurs, psl, pv, rainfall, sfcWind, snowLying, sun, tas, tasmax, tasmin, Ntot, SOx, CaMg, Cl))
+
+data_long <- data |> 
+  pivot_longer(cols = c(Elevation_1haAve, DD_11point5Deg_CLIMEX5km, groundfrost, hurs, psl, pv, rainfall, sfcWind, snowLying, sun, tas, tasmax, tasmin), names_to = "EnvVar", values_to = "Value")
+
+all_env <- ggplot(data_long, aes(x = Value, y = PDI)) + 
+  geom_point(aes(fill = Severity), shape = 21, size = 4) + 
+  geom_smooth(aes(fill = Severity), method = "lm") + 
+  labs(y = "PDI") + 
+  facet_wrap(vars(EnvVar), scales = "free_x") +
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+proximity <- ggplot(data, aes(x = sfcWind, y = PDI)) + 
+  geom_point(aes(fill = AODProx), shape = 21, size = 4) + 
+  geom_smooth(method = "lm") + 
+  labs(x = "Average wind speed (knots)", y = "PDI") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+
+severity <- ggplot(data, aes(x = sfcWind, y = PDI)) + 
+  geom_point(aes(fill = Severity), shape = 21, size = 4) + 
+  geom_smooth(aes(fill = Severity), method = "lm") + 
+  labs(x = "Average wind speed (knots)", y = "PDI") + 
+  theme_bw() + 
+  theme(legend.position = "bottom") + 
+  scale_fill_viridis_d()
+
+proximity + severity
+```
+
+```{r}
+model <- brm(PDI_unscaled_scaled ~ AODProx + Severity*sfcWind, data = data, prior = set_prior("normal(0, 5)", class = "b"), chains = 4, cores = 4, iter = 4000) |> add_criterion("loo")
+
+model_min <- brm(PDI_unscaled_scaled ~ Severity + sfcWind_scaled + sun_scaled + Cl_scaled + snowLying_scaled + psl_scaled, data = data, prior = set_prior("normal(0, 5)", class = "b"), chains = 4, cores = 4) |> add_criterion("loo")
+
+data_pred_model <- cbind(data, predict(model, newdata = data)) |> mutate(Imputed = ifelse(is.na(PDI), TRUE, FALSE))
+data_pred_model_min <- cbind(data, predict(model_min, newdata = data)) |> mutate(Imputed = ifelse(is.na(PDI), TRUE, FALSE))
+
+model_plot <- ggplot(data_pred_model, aes(x = Severity, y = PDI_unscaled_scaled)) + geom_point() + geom_pointrange(data = filter(data_pred_model, Imputed == TRUE), aes(y = Estimate, ymin = `Q2.5`, ymax = `Q97.5`), colour = "red", position = position_jitter(width = 0.35)) + theme_bw() + labs(y = "Phenotypic decline index")
+
+model_min_plot <- ggplot(data_pred_model_min, aes(x = Severity, y = PDI_unscaled_scaled)) + geom_point() + geom_pointrange(data = filter(data_pred_model_min, Imputed == TRUE), aes(y = Estimate, ymin = `Q2.5`, ymax = `Q97.5`), colour = "red", position = position_jitter(width = 0.35)) + theme_bw() + labs(y = "Phenotypic decline index")
+
+model_plot + model_min_plot
+
+model_cv_varsel <- cv_varsel(model)
+solution_terms(model_cv_varsel)[1:suggest_size(model_cv_varsel)]
+```
+

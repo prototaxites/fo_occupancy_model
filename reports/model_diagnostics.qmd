@@ -1,0 +1,247 @@
+---
+project:
+  execute-dir: project
+format:
+    html:
+        embed-resources: true
+        default-image-extension: svg
+params:
+  tissue: "Leaf"
+  marker: "ITS"
+---
+
+# Model diagnostics for `r params$tissue` `r params$marker` 3-level occupancy model.
+
+## Load the model and packages
+
+```{r}
+#| echo: false
+library(posterior)
+library(tidyverse)
+library(bayesplot)
+library(cmdstanr)
+library(targets)
+
+phylo <- tar_read_raw(glue::glue("microbiome_filtered_{params$marker}_{params$tissue}"))
+model_summary <- tar_read_raw(glue::glue("model_summary_{params$marker}_{params$tissue}"))
+model_diagnostics <- tar_read_raw(glue::glue("model_diagnostics_{params$marker}_{params$tissue}"))
+model_draws <- tar_read_raw(glue::glue("model_draws_{params$marker}_{params$tissue}")) |> 
+  as_draws_rvars()
+model_postpreds <- tar_read_raw(glue::glue("model_postpreds_{params$marker}_{params$tissue}")) |> 
+  as_draws_rvars()
+model_data <- tar_read_raw(glue::glue("stan_data_{params$marker}_{params$tissue}"))
+loo <- tar_read_raw(glue::glue("loo_diag_{params$marker}_{params$tissue}"))
+```
+
+## MCMC diagnostics
+
+Basic MCMC diagnostic checks. Models with divergent transitions, or large numbers of max_treedepth errors, are likely problematic and need refinement.
+
+```{r}
+#| echo: false
+model_diagnostics
+```
+
+### Rhats
+
+Rhat is a parameter-level summary statistic that attempts to summarise the convergence of a set of HMC/MCMC chains. A value close to 1 (approximately < 1.05) indicates chain convergence for that parameter. Below is a histogram of Rhat values for all model parameters, giving a rough at-a-glance summary of model convergence.
+
+```{r}
+#| echo: false
+model_summary |> 
+  ggplot(aes(x = rhat)) +
+  geom_histogram() +
+  labs(x = "Rhat", y = "Frequency") +
+  theme_bw()
+```
+
+It should be noted that while this is a good rough guide, it is still important to inspect the MCMC chains more closely to gain further assurances of convergence.
+
+### Trace plots
+
+Below are MCMC traceplots for a selection of parameters of different types, to give a better overview of any convergence problems that may have occurred.
+
+#### Sigmas
+
+Evironment sigmas:
+
+```{r}
+#| echo: false
+posterior::subset_draws(model_draws, "sigmas_env") |> bayesplot::mcmc_trace()
+```
+
+Sample sigmas:
+
+```{r}
+#| echo: false
+posterior::subset_draws(model_draws, "sigmas_sample") |> bayesplot::mcmc_trace()
+```
+
+#### Proportions
+
+Environment props:
+
+```{r}
+#| echo: false
+pluck(model_draws, "props_env") |> {\(x) x[,1]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+pluck(model_draws, "props_env") |> {\(x) x[,2]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+pluck(model_draws, "props_env") |> {\(x) x[,3]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+```
+
+Sample props:
+
+```{r}
+#| echo: false
+pluck(model_draws, "props_sample") |> {\(x) x[,1]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+pluck(model_draws, "props_sample") |> {\(x) x[,2]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+```
+
+#### Fixed effects
+
+Site occupancy:
+
+```{r}
+#| echo: false
+pluck(model_draws, "b_env") |> {\(x) x[1,]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+pluck(model_draws, "b_env") |> {\(x) x[2,]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+pluck(model_draws, "b_env") |> {\(x) x[3,]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+```
+
+Sample occupancy:
+
+```{r}
+#| echo: false
+pluck(model_draws, "b_sample") |> {\(x) x[1,]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+pluck(model_draws, "b_sample") |> {\(x) x[2,]}() |> as_draws_array() |> bayesplot::mcmc_trace()
+```
+
+#### Species effects
+
+Choose three random species to evaluate for:
+
+```{r}
+n_spp <- pluck(model_draws, "b_env_species") |> {\(x) dim(x)[3]}()
+spp <- sample(n_spp, size = 3)
+
+spp
+```
+
+Environment effects:
+
+```{r}
+#| echo: false
+#| fig-width: 8
+#| fig-height: 16
+pluck(model_draws, "b_env_species") |>
+  {\(x) drop(x[1,,])}() |> 
+  draws_rvars(b_env_species = _) |> 
+  bayesplot::mcmc_trace(pars = vars(param_glue("b_env_species[{var},{species}]",
+                                               var = c(1:11),
+                                               species = spp)
+                                    )
+                        )
+
+pluck(model_draws, "b_env_species") |>
+  {\(x) drop(x[2,,])}() |> 
+  draws_rvars(b_env_species = _) |> 
+  bayesplot::mcmc_trace(pars = vars(param_glue("b_env_species[{var},{species}]",
+                                               var = c(1:11),
+                                               species = spp)
+                                    )
+                        )
+
+pluck(model_draws, "b_env_species") |>
+  {\(x) drop(x[3,,])}() |> 
+  draws_rvars(b_env_species = _) |> 
+  bayesplot::mcmc_trace(pars = vars(param_glue("b_env_species[{var},{species}]",
+                                               var = c(1:11),
+                                               species = spp)
+                                    )
+                        )
+```
+
+Sample occupancy:
+
+```{r}
+#| echo: false
+#| fig-width: 8
+#| fig-height: 16
+pluck(model_draws, "b_sample_species") |>
+  {\(x) drop(x[1,,])}() |> 
+  draws_rvars(b_sample_species = _) |> 
+  bayesplot::mcmc_trace(pars = vars(param_glue("b_sample_species[{species}]",
+                                               species = spp)
+                                    )
+                        )
+
+pluck(model_draws, "b_sample_species") |>
+  {\(x) drop(x[2,,])}() |> 
+  draws_rvars(b_sample_species = _) |> 
+  bayesplot::mcmc_trace(pars = vars(param_glue("b_sample_species[{species}]",
+                                               species = spp)
+                                    )
+                        )
+```
+
+#### Dispersion
+
+```{r}
+#| echo: false
+posterior::subset_draws(model_draws, c("sigma_phi", "a_phi")) |> bayesplot::mcmc_trace()
+posterior::subset_draws(model_draws, c("z_phi")) |> bayesplot::mcmc_trace(pars = vars(param_range("z_phi", spp)))
+```
+
+#### Size factors
+
+```{r}
+n_size_factors <-  posterior::subset_draws(model_draws, "SF") |> as_draws_rvars() |> pluck("SF") |> length()
+sfs <- sample(n_size_factors, 10)
+
+sfs
+
+posterior::subset_draws(model_draws, c("SF")) |> bayesplot::mcmc_trace(pars = vars(param_range("SF", sfs)))
+```
+
+## Leave-one-out cross-validation
+
+Assuming MCMC diagnostics have passed, below is the leave-one-out cross validation score for the model, with moment matching.
+
+```{r}
+n_pars <- model_summary |> 
+  filter(!str_detect(variable, "species")) |> 
+  filter(variable != "phi") |> 
+  filter(variable != "log_lik")
+
+n_pars
+
+loo$estimates
+```
+
+## Goodness-of-fit
+
+```{r}
+Y <- model_data$Y |> as.vector()
+Y_rep <- model_postpreds$Y_rep |> 
+  t() |> 
+  as.vector()
+
+len_Y <- length(Y)
+max_sample <- 5000
+if(len_Y > max_sample) {
+  which_Y <- sample(1:len_Y, size = max_sample)
+} else {
+  which_Y <- 1:len_Y
+}
+
+bayesplot::ppc_ecdf_overlay(y = Y[which_Y],
+                    yrep = draws_of(Y_rep[which_Y]), 
+                    discrete = TRUE
+                    ) +
+  scale_x_continuous(trans = "pseudo_log")
+
+bayesplot::ppc_rootogram(y = Y[which_Y],
+                    yrep = draws_of(Y_rep[which_Y]), 
+                    style = "hanging"
+                    ) +
+  scale_x_continuous(trans = "pseudo_log")
+```

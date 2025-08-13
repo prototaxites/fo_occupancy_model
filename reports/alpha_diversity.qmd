@@ -1,0 +1,288 @@
+---
+title: "Alpha diversity and taxonomy of FO samples"
+format:
+    html:
+        embed-resources: true
+        default-image-extension: svg
+project:
+    execute_dir: project
+editor: visual
+---
+
+## Load data
+
+```{r read_data}
+#| include: false
+
+library(tidyverse)
+library(targets)
+library(phyloseq)
+library(ggVennDiagram)
+library(microViz)
+library(metacoder)
+
+ps_its <- tar_read(phyloseq_its)
+tax_table(ps_its) <- tax_table(ps_its)[,1:7]
+ps_16s <- tar_read(phyloseq_16s)
+tax_table(ps_16s) <- tax_table(ps_16s)[,1:7]
+```
+
+## Overlap in ASVs among tissues
+
+```{r}
+#| echo: false
+
+tissues <- c("Leaf", "Stem", "Soil")
+its_asvs <- map(tissues, \(x) ps_filter(ps_its, Tissue == x) |> taxa_names())
+rrna_asvs <- map(tissues, \(x) ps_filter(ps_16s, Tissue == x) |> taxa_names())
+asvs <- map2(its_asvs, rrna_asvs, \(x, y) c(x, y))
+```
+
+### ITS ASVs
+
+```{r}
+#| echo: false
+
+its_venn_df <- process_data(
+  Venn(list(Leaf = its_asvs[[1]],
+            Stem = its_asvs[[2]],
+            Soil = its_asvs[[3]]))
+)
+
+ggplot() +
+  geom_polygon(aes(X, Y, fill = id, group = id), data = venn_regionedge(its_venn_df), show.legend = FALSE) +
+  geom_path(aes(X, Y, group = id), colour = "black", data = venn_setedge(its_venn_df), show.legend = FALSE) +
+  geom_text(aes(X, Y, label = name), data = venn_setlabel(its_venn_df), size = 8) +
+  geom_label(aes(X, Y, label = count), fontface = "bold", data = venn_regionlabel(its_venn_df), size = 8) +
+  scale_fill_manual(values = c("1" = "olivedrab3", 
+                               "2" = "bisque2", 
+                               "3" = "salmon4", 
+                               "1/2" = "#C4D175",
+                               "1/3" = "#938D36",
+                               "2/3" = "#BD9178",
+                               "1/2/3" = "#b1a561")) +
+  coord_equal() +
+  # scale_x_continuous(expand = expansion(mult = .2)) +
+  theme_void() + 
+  theme(legend.position = "none")
+```
+
+### 16S ASVs
+
+```{r}
+#| echo: false
+
+rrna_venn_df <- process_data(
+  Venn(list(Leaf = rrna_asvs[[1]],
+            Stem = rrna_asvs[[2]],
+            Soil = rrna_asvs[[3]]))
+)
+
+ggplot() +
+  geom_polygon(aes(X, Y, fill = id, group = id), data = venn_regionedge(rrna_venn_df), show.legend = FALSE) +
+  geom_path(aes(X, Y, group = id), colour = "black", data = venn_setedge(rrna_venn_df), show.legend = FALSE) +
+  geom_text(aes(X, Y, label = name), data = venn_setlabel(rrna_venn_df), size = 8) +
+  geom_label(aes(X, Y, label = count), fontface = "bold", data = venn_regionlabel(rrna_venn_df), size = 8) +
+  scale_fill_manual(values = c("1" = "olivedrab3", 
+                               "2" = "bisque2", 
+                               "3" = "salmon4", 
+                               "1/2" = "#C4D175",
+                               "1/3" = "#938D36",
+                               "2/3" = "#BD9178",
+                               "1/2/3" = "#b1a561")) +
+  coord_equal() +
+  # scale_x_continuous(expand = expansion(mult = .2)) +
+  theme_void() + 
+  theme(legend.position = "none")
+```
+
+### All ASVs
+
+```{r}
+#| echo: false
+
+venn_df <- process_data(
+  Venn(list(Leaf = asvs[[1]],
+            Stem = asvs[[2]],
+            Soil = asvs[[3]]))
+)
+
+ggplot() +
+  geom_polygon(aes(X, Y, fill = id, group = id), data = venn_regionedge(venn_df), show.legend = FALSE) +
+  geom_path(aes(X, Y, group = id), colour = "black", data = venn_setedge(venn_df), show.legend = FALSE) +
+  geom_text(aes(X, Y, label = name), data = venn_setlabel(venn_df), size = 8) +
+  geom_label(aes(X, Y, label = count), fontface = "bold", data = venn_regionlabel(venn_df), size = 8) +
+  scale_fill_manual(values = c("1" = "olivedrab3", 
+                               "2" = "bisque2", 
+                               "3" = "salmon4", 
+                               "1/2" = "#C4D175",
+                               "1/3" = "#938D36",
+                               "2/3" = "#BD9178",
+                               "1/2/3" = "#b1a561")) +
+  coord_equal() +
+  # scale_x_continuous(expand = expansion(mult = .2)) +
+  theme_void() + 
+  theme(legend.position = "none")
+```
+
+## Taxonomy - metacoder heat trees
+
+```{r}
+#| echo: false
+#| warnings: false
+
+its_mc <- parse_phyloseq(ps_its)
+its_mc$data$tax_abund <- calc_taxon_abund(its_mc, "otu_table")
+
+rrna_mc <- parse_phyloseq(ps_16s)
+rrna_mc$data$tax_abund <- calc_taxon_abund(rrna_mc, "otu_table")
+
+its_mc$data$tax_occ <- calc_n_samples(its_mc, 
+                                      "tax_abund", 
+                                      groups = sample_data(ps_its)$Tissue,
+                                      cols = rownames(sample_data(ps_its))
+                                      )
+rrna_mc$data$tax_occ <- calc_n_samples(rrna_mc, 
+                                       "tax_abund", 
+                                       groups = sample_data(ps_16s)$Tissue,
+                                      cols = rownames(sample_data(ps_16s))
+                                      )
+```
+
+### ITS
+
+```{r}
+#| echo: false
+#| warnings: false
+
+its_mc |> 
+  filter_taxa(taxon_ranks == "Class", supertaxa = TRUE) |> 
+  heat_tree(node_label = taxon_names,
+            node_size = n_obs,
+            node_color = n_obs,
+            title = NULL,
+            initial_layout = "re", layout = "da",
+            node_size_axis_label = "Number of OTUs",
+            node_color_axis_label = "Number of OTUs",
+            make_node_legend = FALSE
+            ) +
+    theme(rect = element_rect(fill = "transparent"))
+
+```
+
+### 16S
+
+```{r}
+#| echo: false
+#| warnings: false
+
+rrna_mc |> 
+  filter_taxa(taxon_ranks == "Class", supertaxa = TRUE) |> 
+  heat_tree(node_label = taxon_names,
+            node_size = n_obs,
+            node_color = n_obs,
+            title = NULL,
+            initial_layout = "re", layout = "da",
+            node_size_axis_label = "Number of OTUs",
+            node_color_axis_label = "Number of OTUs",
+            make_node_legend = FALSE
+            ) +
+    theme(rect = element_rect(fill = "transparent"))
+```
+
+## Association of microbial class with tissue
+
+```{r}
+ps_its_class <- tax_glom(ps_its, taxrank = rank_names(ps_its)[3])
+ps_16s_class <- tax_glom(ps_16s, taxrank = rank_names(ps_16s)[3])
+taxa_names(ps_its_class) <- ps_its_class@tax_table[,3]
+taxa_names(ps_16s_class) <- ps_16s_class@tax_table[,3]
+
+ps_its_class_long <- psmelt(ps_its_class) |> 
+  mutate(TotalReads = sum(Abundance), .by = "Sample") |> 
+  mutate(marker = "ITS")
+
+ps_16s_class_long <- psmelt(ps_16s_class) |> 
+  mutate(TotalReads = sum(Abundance), .by = "Sample") |> 
+  mutate(marker = "16S")
+
+pred_dat <- expand_grid(Tissue = c("Leaf", "Stem", "Soil"),
+                        TotalReads = 10000)
+
+contrasts <- function(rvar_vec) {
+  combinations <- combn(1:length(rvar_vec), m = 2)
+  
+  contrasts <- map(1:length(rvar_vec), \(x)
+      rvar_vec[combinations[1,x]] - rvar_vec[combinations[2,x]]
+      ) |> list_c()
+}
+
+ps_full <- bind_rows(ps_its_class_long, ps_16s_class_long) |> 
+  nest(.by = c(Kingdom, Phylum, Class, marker)) |> 
+  mutate(model = map(data, 
+                     \(x) brm(bf(
+                       Abundance | vint(TotalReads) ~ 0 + Tissue,
+                       phi ~ 0 + Tissue,
+                       family = beta_binomial2
+                     ),
+                     prior = c(
+                       prior(beta(0.5, 2), class = b, lb = 0, ub = 1),
+                       prior(exponential(4), class = b, dpar = phi, lb = 0)
+                     ),
+                     chains = 4, cores = 4, threads = threading(2),
+                     backend = "cmdstan",
+                     silent = 0,
+                     warmup = 1000,
+                     stanvars = stanvars,
+                     iter = 2000,
+                     data = x
+                     )
+  ))
+
+ps_full2 <- ps_full |> mutate(
+  divergences = map(model, \(x) sum(nuts_params(x)[nuts_params(x)[,3] == "divergent__", 4])) |> list_c(),
+  converged = map(model, \(x) as_draws(x) |> summarise_draws() |> pull(rhat) |> {\(y) !any(y > 1.05)}()),
+  epred = map(model, \(x) posterior_epred(x, newdata = pred_dat) |> posterior::rvar()),
+  pred = map(model, \(x) 
+             posterior_predict(x, newdata = pred_dat) |> 
+               {\(x) x / 10000}() |> 
+               posterior::rvar()),
+  contrasts_epred = map(epred, \(x) contrasts(x)),
+  contrasts_pred = map(pred, \(x) contrasts(x)),
+  any_sig_contrasts = map(contrasts_epred, \(x) !all(between(mean(x), 0.025, 0.975))) |> list_c()
+  ) |> 
+  pivot_longer(cols = c(epred, contrasts_epred, pred, contrasts_pred), names_to = "PP", values_to = "pred") |> 
+  unnest_longer(pred) |> 
+  mutate(Contrast = c("Leaf - Stem", "Leaf - Soil", "Stem - Soil"), 
+         .by = c(Class, marker, PP)
+  )
+
+ps_full2 |> 
+  filter(PP == "contrasts_epred", Kingdom == "Bacteria", any_sig_contrasts == TRUE) |> 
+  ggplot(aes(xdist = pred, y = fct_rev(Class), colour = Contrast)) + 
+  stat_pointinterval(position = position_dodge(width = 0.8)) + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(x = "Change in relative abundance", y = "Class") + 
+  facet_grid(cols = vars(Contrast)) +
+  theme_bw()
+
+ps_full2 |> 
+  filter(PP == "contrasts_epred", Kingdom == "Fungi", any_sig_contrasts == TRUE) |> 
+  ggplot(aes(xdist = pred, y = fct_rev(Class), colour = Contrast)) + 
+  stat_pointinterval(position = position_dodge(width = 0.8)) + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(x = "Change in relative abundance", y = "Class") + 
+  facet_grid(cols = vars(Contrast)) +
+  theme_bw()
+```
+
+```{r}
+library(CooccurrenceAffinity)
+
+k <- ps |> subset_samples(Tissue == "Leaf") |>  subset_taxa(Order == "Lactobacillales") |> phyloseq::filter_taxa(\(x) sum(x) > 0, prune = TRUE) |> ntaxa()
+mA <- ps |> subset_taxa(Order == "Lactobacillales") |> phyloseq::filter_taxa(\(x) sum(x) > 0, prune = TRUE) |> ntaxa()
+mB <- ntaxa(ps) - mA
+N <- ntaxa(ps)
+
+ML.Alpha(k, c(mA, mB, N))
+```

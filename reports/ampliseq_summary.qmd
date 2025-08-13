@@ -1,0 +1,48 @@
+---
+title: "Ampliseq summaries"
+author: "Jim Downie"
+---
+
+```{r}
+library(targets)
+library(tidyverse)
+library(ggdist)
+library(posterior)
+library(phyloseq)
+
+its <- read_tsv("data/its_overall_summary.tsv")
+rrna <- read_tsv("data/16s_overall_summary.tsv")
+
+ps_its <- tar_read(phyloseq_its) |> 
+  psmelt() |> summarise(tax_filter = sum(Abundance), .by = c(Sample, SampleType)) |> 
+  rename(sample = Sample)
+ps_16s <- tar_read(phyloseq_16s) |> 
+  psmelt() |> summarise(tax_filter = sum(Abundance), .by = c(Sample, SampleType)) |> 
+  rename(sample = Sample)
+
+ps_data <- bind_rows(ps_its, ps_16s)
+
+data <- bind_rows(its, rrna) |> 
+  mutate(Marker = str_extract(sample, "16S|ITS")) |> 
+  select(-cutadapt_passing_filters_percent) |> 
+  left_join(ps_data)
+```
+
+```{r}
+data |> 
+  pivot_longer(cols = !c(Marker, sample, SampleType), names_to = "Stage", values_to = "Reads") |> 
+  filter(!is.na(Reads), SampleType == "Sample") |> 
+  summarise(Reads = rvar(Reads), .by = c(Marker, Stage)) |> 
+  mutate(median = median(Reads), stage_numeric = rep(1:9, times = 2)) |> 
+  ggplot(aes(x = fct_reorder(Stage, stage_numeric))) +
+  stat_lineribbon(aes(ydist = Reads, fill = after_stat(.width), group = Marker), .width = ppoints(10)) +
+  facet_grid(rows = vars(Marker), scales = "free_y") +
+  scale_fill_distiller() +
+  #scale_y_continuous(transform = "log10") +
+  labs(x = "Processing stage",
+       y = "Number of reads",
+       fill = "Quantile") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+```

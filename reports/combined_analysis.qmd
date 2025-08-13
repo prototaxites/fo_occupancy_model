@@ -1,0 +1,1009 @@
+---
+title: "Combined analysis of multiple models"
+format:
+    html:
+        embed-resources: true
+        default-image-extension: svg
+project:
+    execute_dir: project
+editor: visual
+---
+
+## Load data
+
+```{r read_data}
+#| include: false
+
+library(tidyverse)
+library(targets)
+library(phyloseq)
+library(microViz)
+library(brms)
+library(posterior)
+library(ggdist)
+library(ggVennDiagram)
+library(speedyseq)
+library(patchwork)
+library(metacoder)
+tar_source()
+
+ps_its <- tar_read(phyloseq_its, store = here::here("_targets")) |> 
+  ps_mutate(marker = "ITS")
+tax_table(ps_its) <- tax_table(ps_its)[,1:7]
+ps_16s <- tar_read(phyloseq_16s, store = here::here("_targets")) |> 
+  ps_mutate(marker = "16S") |> 
+  fix_ps_tax("data/asvs.taxonomy.sativa.tsv")
+
+tar_load(site_df)
+```
+
+## Taxonomy - metacoder heat trees
+
+```{r}
+#| echo: false
+#| warnings: false
+
+its_mc <- parse_phyloseq(ps_its)
+its_mc$data$tax_abund <- calc_taxon_abund(its_mc, "otu_table")
+
+rrna_mc <- parse_phyloseq(ps_16s)
+rrna_mc$data$tax_abund <- calc_taxon_abund(rrna_mc, "otu_table")
+
+its_mc$data$tax_occ <- calc_n_samples(its_mc, 
+                                      "tax_abund", 
+                                      groups = sample_data(ps_its)$Tissue,
+                                      cols = rownames(sample_data(ps_its))
+                                      )
+rrna_mc$data$tax_occ <- calc_n_samples(rrna_mc, 
+                                       "tax_abund", 
+                                       groups = sample_data(ps_16s)$Tissue,
+                                      cols = rownames(sample_data(ps_16s))
+                                      )
+(its_tree <- its_mc |> 
+  filter_taxa(taxon_ranks == "Class", supertaxa = TRUE) |> 
+  heat_tree(node_label = taxon_names,
+            node_label_size_range = c(0.02, 0.05),
+            node_size = n_obs,
+            node_color = n_obs,
+            title = NULL,
+            initial_layout = "reingold-tilford", layout = "reingold-tilford",
+            # node_size_axis_label = "Number of ASVs",
+            node_color_axis_label = "Number of ASVs",
+            make_edge_legend = FALSE
+            ) +
+    theme(rect = element_rect(fill = "transparent")))
+
+rrna_tree <- rrna_mc |> 
+  filter_taxa(taxon_ranks == "Class", supertaxa = TRUE) |> 
+  heat_tree(node_label = taxon_names,
+            node_label_size_range = c(0.02, 0.05),
+            node_size = n_obs,
+            node_color = n_obs,
+            title = NULL,
+            initial_layout = "reingold-tilford", layout = "reingold-tilford",
+            # node_size_axis_label = "Number of OTUs",
+            node_color_axis_label = "Number of ASVs"
+            ) +
+    theme(rect = element_rect(fill = "transparent"))
+
+tax_trees <- rrna_tree + its_tree + plot_annotation(tag_levels = "a")
+ggsave("../Papers/Figures/tax_trees.png", width = 180, height = 90, units = "mm")
+```
+
+## Community composition metrics
+
+How does the community composition differ between the different tissue types? Comparing both ordination and richness of ASVS:
+
+```{r}
+ps <- merge_phyloseq(ps_its, ps_16s) |> 
+  ps_mutate(SampleID = paste(Tissue, Site, Tree, sep = "-")) |> 
+  speedyseq::merge_samples2(group = "SampleID")
+
+asvs_leaf <- ps |> ps_filter(Tissue == "Leaf") |> taxa_names()
+asvs_stem <- ps |> ps_filter(Tissue == "Stem") |> taxa_names()
+asvs_soil <- ps |> ps_filter(Tissue == "Soil") |> taxa_names()
+
+venn_df <- process_data(
+  Venn(list(Leaf = asvs_leaf,
+            Stem = asvs_stem,
+            Soil = asvs_soil))
+)
+
+venn <- ggplot() +
+  geom_polygon(aes(X, Y, fill = id, group = id), data = venn_regionedge(venn_df), show.legend = FALSE) +
+  geom_path(aes(X, Y, group = id), colour = "black", data = venn_setedge(venn_df), show.legend = FALSE) +
+  geom_text(aes(X, Y, label = name), data = venn_setlabel(venn_df), size = 2) +
+  geom_label(aes(X, Y, label = count), fontface = "bold", size = 2, data = venn_regionlabel(venn_df)) +
+  scale_fill_manual(values = c("1" = "olivedrab3", 
+                               "2" = "bisque2", 
+                               "3" = "salmon4", 
+                               "1/2" = "#C4D175",
+                               "1/3" = "#938D36",
+                               "2/3" = "#BD9178",
+                               "1/2/3" = "#b1a561")) +
+  coord_equal() +
+  # scale_x_continuous(expand = expansion(mult = .2)) +
+  theme_void() + 
+  theme(legend.position = "none", 
+        panel.background = element_rect(colour = "black", fill = "white", linewidth = 1))
+
+venn
+```
+
+Leaf is by far the least diverse tissue, with the fewest total ASVs. The overlap in ASVs appears to depend on the proximity of the tissue types to one another - leaf and stem, and stem and soil, share more ASVs than leaf and soil. There are very few global ASVs.
+
+Looking at the ordination shows a very similar pattern:
+
+```{r}
+ord <- ordinate(ps, method = "NMDS", distance = "horn", trymax = 100, parallel = 8)
+ord_plot <- plot_ordination(ps, ord, justDF = TRUE) |> 
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(colour = Tissue), size = 1) +
+  scale_colour_manual(values = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  lims(x = c(-4, 4)) +
+  # labs(x = NULL, y = NULL) +
+  theme_bw() + 
+  theme(legend.position = "none")
+
+ord_inset <- ord_plot + inset_element(venn, left = 0.6, bottom = 0.6, top = 0.99, right = 0.99)
+
+ord_plot
+```
+
+The ordination seems to suggest that leaf samples are more tightly clustered together - we can quantify the average similarity among samples from each tissue type to check this. Here, using the horn index, where higher = more similarity among samples:
+
+```{r}
+leaf_sim <- rvar(as.vector(1 - vegan::vegdist(t(otu_table(ps_filter(ps, Tissue == "Leaf"))), distance = "horn")))
+stem_sim <- rvar(as.vector(1 - vegan::vegdist(t(otu_table(ps_filter(ps, Tissue == "Stem"))), distance = "horn")))
+soil_sim <- rvar(as.vector(1 - vegan::vegdist(t(otu_table(ps_filter(ps, Tissue == "Soil"))), distance = "horn")))
+
+sim_df <- tibble(Tissue = c("Leaf", "Stem", "Soil"), 
+                 horn = c(leaf_sim, stem_sim, soil_sim),
+                 num = 1:3
+                 )
+
+ggplot(sim_df, aes(x = fct_reorder(Tissue, num), ydist = horn)) + 
+  stat_dots(aes(colour = Tissue), layout = "weave") +
+  scale_colour_discrete(type = c("olivedrab3", "salmon4", "bisque2")) +
+  # scale_colour_manual(values = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  labs(x = "Tissue", y = "Pairwise similarity") + 
+  theme_bw() + 
+  theme(legend.position = "bottom")
+```
+
+## Association of microbial class with tissue
+
+We see that each tissue has drastically different microbial communities - but which taxonomic groups are driving this?
+
+```{r}
+ps_its_class <- tax_glom(ps_its, taxrank = rank_names(ps_its)[3])
+ps_16s_class <- tax_glom(ps_16s, taxrank = rank_names(ps_16s)[3])
+taxa_names(ps_its_class) <- ps_its_class@tax_table[,3]
+taxa_names(ps_16s_class) <- ps_16s_class@tax_table[,3]
+
+ps_its_class_long <- psmelt(ps_its_class) |> 
+  mutate(TotalReads = sum(Abundance), .by = "Sample") |> 
+  mutate(marker = "ITS")
+
+ps_16s_class_long <- psmelt(ps_16s_class) |> 
+  mutate(TotalReads = sum(Abundance), .by = "Sample") |> 
+  mutate(marker = "16S")
+
+contrasts <- function(rvar_vec) {
+  combinations <- combn(1:length(rvar_vec), m = 2)
+  
+  contrasts <- map(1:length(rvar_vec), \(x)
+      rvar_vec[combinations[1,x]] - rvar_vec[combinations[2,x]]
+      ) |> list_c()
+}
+
+mod <- cmdstanr::cmdstan_model("Stan/bb_mod.stan")
+
+make_bb_mod_data <- function(df, category) {
+  cat <- factor(pull(df, category)) |> 
+    fct_relevel(c("Leaf", "Stem", "Soil"))
+
+  list(
+    N = nrow(df),
+    N_cat = length(unique(cat)),
+    Y = df$Abundance,
+    Total = df$TotalReads,
+    Categories = cat,
+    cor = matrix(c(1, 0.3, 0.3, 1), ncol = 2),
+    sigma = c(1, 1)
+  )
+}
+
+ps_full <- bind_rows(ps_its_class_long, ps_16s_class_long) |> 
+  filter(TotalReads != 0) |>
+  mutate(Tissue_num = as.numeric(fct_relevel(Tissue, c("Leaf", "Stem", "Soil")))) |> 
+  nest(.by = c(Kingdom, Phylum, Class, marker)) |> 
+  mutate(standata = map(data, \(x) make_bb_mod_data(x, "Tissue")),
+         model = map(standata, 
+                     \(x) mod$sample(data = x, chains = 4, parallel_chains = 4))
+         )
+
+ps_full2 <- ps_full |> 
+  mutate(
+    divergences = list_c(map(model, \(x) sum(x$diagnostic_summary()$num_divergent))),
+    converged = list_c(map(model, \(x) as_draws(x) |> summarise_draws() |> pull(rhat) |> {\(y) !any(y > 1.05)}())),
+    epred = map(model, \(x) as_draws_rvars(x) |> pluck("epred")),
+    pred = map(model, \(x) as_draws_rvars(x) |> pluck("ppred")),
+    contrasts_epred = map(epred, \(x) contrasts(x)),
+    contrasts_pred = map(pred, \(x) contrasts(x)),
+    any_sig_contrasts = map(contrasts_epred, \(x) any(mean(x >= -0.05 & x <= 0.05) < 0.95)) |> list_c()
+  ) |>
+  pivot_longer(cols = c(epred, contrasts_epred, pred, contrasts_pred), 
+               names_to = "PP", values_to = "pred") |>
+  unnest_longer(pred) |>
+  mutate(Contrast = c("Leaf - Stem", "Leaf - Soil", "Stem - Soil"),
+         Tissue = c("Leaf", "Stem", "Soil"),
+         .by = c(Class, marker, PP)
+  )
+
+n_sig <- ps_full2 |> 
+  filter(PP == "epred", any_sig_contrasts == TRUE) |> 
+  pull(Class) |> unique() |> length()
+
+(props <- ps_full2 |> 
+  filter(PP == "epred", any_sig_contrasts == TRUE) |> 
+  mutate(label = glue::glue("{Kingdom}: {Class}")) |> 
+  ggplot(aes(xdist = pred, y = fct_rev(label), colour = Tissue)) + 
+  stat_pointinterval(position = position_dodge(width = 0.8), size = 0.1) + 
+  geom_hline(yintercept=seq(1.5, n_sig - 0.5, 1),
+             linetype = "dashed", colour = "grey60") +
+  scale_colour_manual(values = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  # facet_grid(rows = vars(label), scales = "free_y") +
+  labs(x = "Mean relative abundance", y = NULL) + 
+  theme_bw() + 
+  theme(legend.position = "none",
+        axis.text = element_text(size = 5),
+        strip.background = element_blank(),
+        strip.text = element_blank()
+        # panel.spacing.y = unit(0, "lines")
+        ))
+```
+
+## Kingdom analysis
+
+```{r}
+deotherise <- function(df){
+  other_count <- df |> filter(Kingdom == "Other") |> pull(Count)
+  df |> mutate(Total = Total - other_count) |> 
+    filter(Kingdom != "Other")
+}
+
+mg_md <- tar_read(tree_df) |> 
+  select(Site, Tree, Severity, Leaf = MG_leaf, Stem = MG_stem, Soil = MG_soil) |> 
+  pivot_longer(cols = c(Leaf, Stem, Soil), names_to = "Tissue", values_to = "SampleID")
+mg_kingdom <- read_csv("data/mg_kingdom_summary.csv") |> 
+  left_join(mg_md) |> 
+  mutate(Tissue_num = as.numeric(fct_relevel(Tissue, c("Leaf", "Stem", "Soil"))),
+         Disease = ifelse(Severity == "Control", 0, 1)) |> 
+  nest(.by = SampleID) |> 
+  rowwise() |> 
+  mutate(data = list(deotherise(data))) |> 
+  unnest(cols = c(data))
+  
+mg_kingdom_tissue_mods <- mg_kingdom |> 
+  nest(.by = c(Kingdom)) |> 
+  mutate(standata = map(data, \(x) make_bb_mod_data(x, "Tissue_num")),
+         model = map(standata, 
+                     \(x) mod$sample(data = x, chains = 4, parallel_chains = 4)),
+         divergences = list_c(map(model, \(x) sum(x$diagnostic_summary()$num_divergent))),
+         converged = list_c(map(model, \(x) as_draws(x) |> summarise_draws() |> pull(rhat) |> {\(y) !any(y > 1.05)}())),
+         epred = map(model, \(x) as_draws_rvars(x) |> pluck("epred")),
+         pred = map(model, \(x) as_draws_rvars(x) |> pluck("ppred"))
+  ) |>
+  pivot_longer(cols = c(epred, pred), 
+               names_to = "PP", values_to = "pred") |>
+  unnest_longer(pred) |>
+  mutate(Tissue = c("Leaf", "Stem", "Soil"),
+         .by = c(Kingdom, PP)
+  )
+
+(kingdom_props <- mg_kingdom_tissue_mods |> 
+  filter(PP == "pred", Kingdom != "Other") |>
+  mutate(label = Kingdom) |> 
+  ggplot(aes(xdist = pred / 10000, y = Tissue, colour = Kingdom)) + 
+  stat_pointinterval(position = position_dodge(width = 0.8), size = 4) + 
+  geom_hline(yintercept=seq(1.5, n_sig - 0.5, 1),
+             linetype = "dashed", colour = "grey60") +
+  # scale_colour_manual(values = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  # facet_grid(rows = vars(label), scales = "free_y") +
+  labs(x = "Predicted relative abundance", y = NULL) + 
+  theme_bw())
+
+pred_dat <- expand_grid(
+  Total = 10000,
+  groundfrost = 0,
+  hurs = 0,
+  pv = 0,
+  rainfall = 0,
+  sfcWind = 0,
+  sun = 0,
+  tas = 0,
+  Ntot = 0,
+  SOx = 0,
+  CaMg = 0,
+  Disease = c(0, 1)
+)
+
+mg_kingdom_disease <- mg_kingdom |>
+  left_join(tar_read(site_df)) |> 
+  mutate(across(groundfrost:Cl, \(x) scale(x)[,1])) |> 
+  nest(.by = c(Kingdom, Tissue)) |> 
+  mutate(model = map(data, \(x) brm(
+    bf(Count | trials(Total) ~ 0 + Intercept + (groundfrost + hurs + pv + rainfall + sfcWind + sun + tas + Ntot + SOx + CaMg + Disease),
+       phi ~ 0 + Intercept,
+       family = "beta_binomial"),
+    prior = c(
+      prior(normal(0, 1), class = "b")
+      ),
+    backend = "cmdstanr",
+    chains = 4,
+    cores = 4,
+    data = x
+    )
+  ),
+  pred = map(model, \(x) pred_dat |> 
+               tidybayes::add_epred_rvars(x) |> 
+               tidybayes::add_predicted_rvars(x)
+             )
+  ) |> 
+  unnest(pred) |> 
+  select(Kingdom, Tissue, Disease, pred = .epred) |> 
+  mutate(pred = pred / 10000 * 100) |> 
+  pivot_wider(names_from = Disease, values_from = pred) |> 
+  mutate(diff = `1` - `0`)
+
+ggplot(mg_kingdom_disease, aes(xdist = diff, 
+                               y = Kingdom)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey80") +
+  stat_pointinterval() +
+  facet_grid(rows = vars(Tissue), scales = "free") +
+  labs(x = "Change in relative abundance in diseased trees (%)") +
+  theme_bw()
+```
+
+## Alpha diversity
+
+We are also interested in alpha diversity metrics, and how these might vary as a function of variables of interest - in particular, AOD.
+
+First, let's look at the raw data. First, species richness:
+
+```{r}
+raw_alpha_div <- map(c("ITS", "16S"), \(x)
+                     map(c("Leaf", "Stem", "Soil"), \(y)
+                         get_per_sample_raw_richness(x, y, 
+                           measures = c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson")))
+                     ) |> list_flatten() |> list_rbind()
+
+ggplot(raw_alpha_div, aes(x = Tissue, y = Observed)) + 
+  geom_dots(aes(colour = Disease, fill = Disease), layout = "swarm") + 
+  scale_colour_hue(direction = -1) +
+  scale_fill_hue(direction = -1) +
+  facet_grid(rows = vars(Marker)) +
+  theme_linedraw()
+```
+
+There might be a very slight decrease in richness in diseased trees for some markers/compartments? Let's run a quick comparison:
+
+```{r}
+richness_mod_nb_shape <- brm(
+  formula = bf(
+    Observed ~ 0 + Intercept + Tissue*Marker*Disease,
+    shape ~ 0 + Intercept + Tissue * Marker
+    ),
+  family = "negbinomial",
+  prior = c(prior(normal(0, 1), class = "b")),
+  data = raw_alpha_div,
+  backend = "cmdstan",
+  cores = 4,
+  chains = 4
+)
+
+newdata <- expand.grid(Tissue = c("Leaf", "Stem", "Soil"),
+                       Marker = c("ITS", "16S"),
+                       Disease = c("Control", "DiseaseAOD"),
+                       TotalReads = 10000)
+
+richness_mod_df <- newdata |> 
+  tidybayes::add_epred_draws(richness_mod_nb_shape) |> 
+  group_by(Tissue, Marker, Disease) |> 
+  summarise(pred = rvar(.epred)) |> 
+  pivot_wider(names_from = Disease, values_from = pred) |>
+  mutate(Diff = DiseaseAOD - Control) |>
+  mutate(Model = "ObsRichness")
+
+richness_mod_df |>
+  ggplot(aes(x = Tissue)) +
+  stat_pointinterval(aes(ydist = Diff, colour = Marker), position = position_dodge(width = 0.8)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_grid(cols = vars(Tissue), scales = "free") +
+  labs(y = "Species richness") +
+  theme_linedraw()
+```
+
+Using the best fitting model (`richness_mod_nb_shape`), there appears to be a decrease in observed richness in diseased trees to about 85 to 90% of healthy richness in leaf and stem, and an increase in richness of about 120% in soil fungi.
+
+Let's compare this to the patterns we see from the occupancy model. We can do this in two ways, 1: we can average across all actual samples, and get the specific differences in richness observed between the models, 2: assume a hypothetical site with all species present, and estimate the difference assuming a diseased and healthy tree at that site.
+
+```{r}
+richnesses_occ_avg <- map(c("ITS", "16S"), \(x)
+              map(c("Leaf", "Stem", "Soil"), \(y)
+                  calculate_average_richness_differences(x, y))
+              ) |> list_flatten() |> list_rbind() |> 
+  mutate(Model = "Occ_Avg")
+
+richnesses_occ_hyp <- map(c("ITS", "16S"), \(x)
+              map(c("Leaf", "Stem", "Soil"), \(y)
+                  model_richness_disease_differences(x, y, n_env_vars = 10, chunk_size = 20))
+              ) |> list_flatten() |> list_rbind() |> 
+  mutate(Disease = ifelse(Disease == 0, "Control", "DiseaseAOD")) |> 
+  pivot_wider(names_from = "Disease", values_from = "pred") |> 
+  mutate(Diff = DiseaseAOD - Control) |> 
+  mutate(Model = "Occ_Hyp")
+
+richness_comp_plot <- bind_rows(richness_mod_df, 
+                                richnesses_occ_hyp) |> 
+  filter(Model == "Occ_Hyp") |> 
+  ggplot(aes(y = Tissue, xdist = Diff, colour = Marker)) + 
+  stat_pointinterval(position = position_dodge(width = 0.3), 
+                     size = 3, linewidth = 1, .width = 0.95) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  # facet_grid(rows = vars(Marker)) +
+  scale_colour_discrete(type = c(`16S` = "slateblue3", ITS = "tomato1")) +
+  labs(colour = "Marker", x = "Difference in species richness (AOD - Control)", y = NULL) +
+  theme_linedraw() +
+  theme(legend.position = "bottom")
+
+richness_comp_plot2 <- richnesses_occ_avg |> 
+  ggplot(aes(y = Tissue, xdist = Diff, colour = Model)) + 
+  stat_pointinterval(position = position_dodge(width = 0.3)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_grid(rows = vars(Marker)) +
+  scale_colour_hue(direction = -1) + 
+  labs(colour = "Marker gene", x = "Difference in species richness (AOD - Control)", y = NULL) +
+  theme_linedraw() +
+  theme(legend.position = "bottom")
+```
+
+Matches the expected pattern from the observed data - though the CIs are wider. Nice!
+
+Finally, we want to know about how much non-detection affects the estimated species richness:
+
+```{r}
+occ_richness_site_df <- map(c("ITS", "16S"), \(x)
+                            map(c("Leaf", "Stem", "Soil"), \(y)
+                                make_richness_df(x, y, level = 1))
+                            ) |> list_flatten() |> list_rbind()
+
+ntaxas <- function(marker, tissue) {
+  ps <- tar_read_raw(glue::glue("microbiome_tj_corrected_{marker}_{tissue}"))
+  tibble(Marker = marker, 
+         Tissue = tissue,
+         NTaxTotal = ntaxa(ps))
+}
+
+ntaxas_df <- map(c("ITS", "16S"), \(x)
+                            map(c("Leaf", "Stem", "Soil"), \(y)
+                                ntaxas(x, y))
+                            ) |> list_flatten() |> list_rbind()
+
+occ_richness_site <- occ_richness_site_df |> 
+  mutate(Ntrees = as.factor(ifelse(AODProx == "AOD", 20, 5))) |> 
+  left_join(ntaxas_df) |> 
+  mutate(n_abs = NTaxTotal - Richness_mod) |> 
+  summarise(Richness_obs_diff = rvar_mean(Richness_obs_diff, na.rm = TRUE),
+            Richness_abs = rvar_mean(n_abs, na.rm = TRUE),
+            .by = c(Tissue, Marker)) 
+
+occ_richness_site_ntrees <- occ_richness_site_df |> 
+  mutate(Ntrees = as.factor(ifelse(AODProx == "AOD", 20, 5))) |> 
+  left_join(ntaxas_df) |> 
+  mutate(n_abs = NTaxTotal - Richness_mod) |> 
+  summarise(Richness_obs_diff = rvar_mean(Richness_obs_diff, na.rm = TRUE),
+            Richness_abs = rvar_mean(n_abs, na.rm = TRUE),
+            .by = c(Tissue, Marker, Ntrees)) 
+
+ggplot(occ_richness_site, aes(x = Marker, ydist = Richness_obs_diff)) +
+  stat_pointinterval(na.rm = TRUE) +
+  scale_colour_discrete() +
+  facet_grid(cols = vars(Tissue)) +
+  theme_light()
+
+ggplot(occ_richness_site_ntrees, aes(x = Marker, ydist = Richness_obs_diff, colour = Ntrees)) +
+  stat_pointinterval(na.rm = TRUE) +
+  scale_colour_discrete() +
+  facet_grid(cols = vars(Tissue)) +
+  theme_light()
+```
+
+## Plot full SDs for all models
+
+```{r}
+env_vars <- c("Intercept", "Groundfrost", "Relative humidity", "Vapour pressure", "Rainfall", "Windspeed", "Sunshine", "Air temperature", "N deposition", "Sulphur deposition", "Ion deposition")
+sample_vars <-  "Disease"
+
+sigmas_df <- map(c("ITS", "16S"), \(x)
+                 map(c("Leaf", "Stem", "Soil"), \(y)
+                     map(0:3, \(z) 
+                         make_sigmas_df(x, y, level = z, env_vars = env_vars, sample_vars = sample_vars))
+                     |> list_rbind()
+                 ) |> list_rbind()
+) |> list_rbind() |> 
+  mutate(org = case_when(
+    marker == "ITS" ~ "Fungi",
+    marker == "16S" ~ "Bacteria",
+    .default = NA
+  ),
+  level_name = case_when(
+    level == 0 ~ "Total",
+    level == 1 ~ "Site",
+    level == 2 ~ "Sample",
+    level == 3 ~ "Reads",
+    .default = NA
+  )
+  )
+
+sigmas_plot <- sigmas_df |>
+  filter(level != 0, var != "Intercept") |> 
+  # filter(!(level == 1 & var == "Disease")) |> 
+  ggplot(aes(y = fct_rev(var))) +
+  ggdist::stat_ccdfinterval(aes(xdist = sigma, 
+                                fill = as.factor(level),
+                                slab_alpha = after_stat(f)), 
+                            fill_type = "gradient",
+                            position = position_dodge(width = 0.9),
+                            thickness = 1
+                            ) +
+  # scale_fill_manual(values = c("slateblue3", "tomato1")) +
+  facet_grid(cols = vars(fct_relevel(tissue, c("Leaf", "Stem", "Soil"))),
+             rows = vars(org)) +
+  labs(y = NULL, x = "CCDF of variance parameter", fill = NULL) +
+  guides(slab_alpha = "none") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+sigmas_bacteria_plot <- sigmas_df |>
+  filter(org == "Bacteria", level_name != "Total", var != "Intercept") |> 
+  filter(!(level == 1 & var == "Disease")) |> 
+  ggplot(aes(y = fct_rev(var))) +
+  ggdist::stat_ccdfinterval(aes(xdist = sigma^2, 
+                                fill = level_name,
+                                slab_alpha = after_stat(f)), 
+                            fill_type = "gradient",
+                            position = position_dodge(width = 0.9),
+                            thickness = 1
+                            ) +
+  facet_grid(cols = vars(fct_relevel(tissue, c("Leaf", "Stem", "Soil")))) +
+  labs(y = NULL, x = "CCDF of variance parameter", fill = NULL) +
+  guides(slab_alpha = "none") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+sigmas_fungi_plot <- sigmas_df |>
+  filter(org == "Fungi", level_name != "Total", var != "Intercept") |> 
+  filter(!(level == 1 & var == "Disease")) |> 
+  ggplot(aes(y = fct_rev(var))) +
+  ggdist::stat_ccdfinterval(aes(xdist = sigma^2, 
+                                fill = level_name,
+                                slab_alpha = after_stat(f)), 
+                            fill_type = "gradient",
+                            position = position_dodge(width = 0.9),
+                            thickness = 1
+                            ) +
+  facet_grid(cols = vars(fct_relevel(tissue, c("Leaf", "Stem", "Soil")))) +
+  labs(y = NULL, x = "CCDF of variance parameter", fill = NULL) +
+  guides(slab_alpha = "none") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+sigmas_fungi_plot / sigmas_bacteria_plot + 
+  plot_layout(axes = "collect", guides = "collect", axis_titles = "collect") & 
+  theme(legend.position = "bottom")
+#ggsave("sigmas_occ_plot.svg", sigmas_plot, width = 8, height = 5)
+```
+
+## Environmental slopes
+
+```{r}
+env_vars <- tar_read(env_vars)
+env_var_names <- c("Groundfrost", "Relative humidity", "Vapour pressure", "Rainfall", "Windspeed", "Sunshine", "Air temperature", "N deposition", "Sulphur deposition", "Ion deposition")
+quantile_slopes_df <- map(c("ITS", "16S"), \(x)
+                 map(c("Leaf", "Stem", "Soil"), \(y)
+                     species_slopes_quantiles(x, y, level = 3, env_vars = env_vars, var_names = env_var_names, site_data = site_df)
+                     )
+                 ) |> list_flatten() |> list_rbind()
+
+quantile_slopes_plot <- quantile_slopes_df |> 
+  filter(level == 1) |> 
+  pivot_wider(names_from = ci, values_from = slope) |> 
+  mutate(x = (seq * sd) + mean,
+         lci_y = exp(lci * seq),
+         uci_y = exp(uci * seq)) |> 
+  ggplot(aes(x = x, ymin = lci_y, ymax = uci_y, fill = Marker, colour = Marker)) +
+  geom_ribbon(alpha = 0.5) +
+  scale_fill_manual(values = c("slateblue3", "tomato1")) +
+  scale_colour_manual(values = c("slateblue3", "tomato1")) +
+  facet_grid(cols = vars(var_names), 
+             rows = vars(fct_relevel(Tissue, c("Leaf", "Stem", "Soil"))), 
+             scale = "free_x") + 
+  labs(x = NULL, y = "Fold change in site-level occupancy probability") +
+  coord_cartesian(ylim = c(0, 20)) +
+  theme_linedraw() +
+  theme(legend.position = "bottom",
+        text = element_text(size = 7),
+        title = element_text(size = 7),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Disease-associated microbes
+
+We want to identify a list of taxa that are putatively associated with plant health status. As we are using a Bayesian approach, we ideally want to use a ROPE test to pull these out, as there's not a clear expectancy that any effect is exactly 0. Instead, we need to define a range of values that we consider "practically zero", and see what proportion of each effect is in that range. For log2 fold changes, I think a range of \[-0.18, 0.18\] is quite a reasonable 'null' as this equates to a range of fold changes from 0.88x to 1.13x. We then need to chose a confidence threshold - if over X% is in the ROPE, we say the effect is not 'significant'. Here, I am using an 11% confidence threshold.
+
+```{r}
+disease_effects <- map(c("ITS", "16S"), \(x)
+              map(c("Leaf", "Stem", "Soil"), \(y)
+                  disease_intervals(x, y, chunk_size = 20))
+              ) |> list_flatten() |> list_rbind() |>
+    rowwise() |> 
+    mutate(ASV_numeric = as.numeric(ASV_numeric),
+           diff_abs = DiseaseAOD - Control,
+           lci_abs = quantile(diff_abs, probs = 0.025),
+           med_abs = quantile(diff_abs, probs = 0.5),
+           uci_abs = quantile(diff_abs, probs = 0.975)) |> 
+    ungroup()
+
+disease_effects <- disease_effects |> 
+  mutate(diff_lfc = log2(DiseaseAOD) - log2(Control),
+    rope = bayestestR::rope(diff_lfc, ci = 1, range = c(-0.1, 0.1))$ROPE_Percentage * 100)
+
+microbes <- filter(disease_effects, rope <= 2.5)
+disease_microbes <- filter(microbes, med_abs > 0)
+health_microbes <- filter(microbes, med_abs < 0)
+
+(tax_plot <- plot_disease_intervals(microbes) + theme(legend.position = "bottom"))
+
+taxonomy <- select(disease_effects, ASV_ID:Species_exact)
+
+reps_health <- representation_likelihood(tax_level = "Order",
+                                  sig_list = health_microbes,
+                                  taxa_list = taxonomy,
+                                  stan_file = "Stan/hyper_intercept.stan") |>
+  mutate(Assoc = "Asymptomatic")
+
+reps_disease <- representation_likelihood(tax_level = "Order",
+                                  sig_list = disease_microbes,
+                                  taxa_list = taxonomy,
+                                  stan_file = "Stan/hyper_intercept.stan") |>
+  mutate(Assoc = "AOD")
+
+reps <- bind_rows(reps_health, reps_disease) |>
+  filter(n_bag != n_pick) |> 
+  filter(n_pick != 0) |> 
+  mutate(median = median(alpha),
+         rope = bayestestR::rope(alpha, ci = 1, range = c(-0.18, 0.18))$ROPE_Percentage)
+
+tax_kingdoms <- select(taxonomy, Kingdom, Order) |> distinct()
+
+res <- filter(reps, rope < 0.025) |>
+  filter(Order != "") |>
+  left_join(tax_kingdoms)
+
+(tax_assoc_plot <- res |> 
+  mutate(tax = glue::glue("{Kingdom}: {Order}")) |> 
+  ggplot(aes(xdist = alpha, y = fct_reorder(tax, median), colour = Assoc)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey70") +
+  stat_pointinterval(.width = c(.0, .89)) +
+  scale_colour_discrete(type = c(AOD = "indianred2", Asymptomatic = "steelblue2")) +
+  labs(y = "Class", x = "log odds pulling clade from bag", colour = "Disease") +
+  theme_linedraw() +
+  theme(legend.position = "bottom"))
+```
+
+------------------------------------------------------------------------
+
+## Tax figure
+
+```{r}
+func_conts <- qs::qread("functions/tissue_contrasts.qs") |> 
+  ggplot(aes(y = forcats::fct_rev(lbl),#forcats::fct_reorder(lbl, log2FoldChange, .fun = mean), 
+           x = log2FoldChange, 
+           xmin = log2FoldChange - ci, 
+           xmax = log2FoldChange + ci,
+           colour = coef)) +
+  geom_pointrange(size = 0.1) +
+  geom_vline(xintercept = 0, colour = "grey70", linetype = "dashed") +
+  facet_grid(cols = vars(coef)) +
+  labs(x = "log2 fold change", y = "", colour = "") +
+  theme_linedraw() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(size = 5),
+        axis.title = element_text(size = 7))
+
+func_ord <- qs::qread("functions/tissue_ord.qs") |> 
+  ggplot(aes(x = NMDS1, y = NMDS2, colour = Tissue)) +
+  geom_point(size = 1) +
+  scale_colour_discrete(type = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  theme_linedraw() +
+  theme(legend.position = "bottom")
+# 
+# wrap_plots(free(rrna_tree), free(its_tree), free(props), ord_inset, func_conts, func_ord, ncol = 2) +
+# plot_annotation(tag_levels = "a") &
+#   theme(text = element_text(size = 6),
+#         title = element_text(size = 7))
+
+wrap_plots(free(props), ord_inset, func_conts, func_ord, ncol = 2) +
+  plot_layout(widths = c(0.4, 0.6)) +
+  plot_annotation(tag_levels = "a") &
+  theme(text = element_text(size = 6),
+        title = element_text(size = 7))
+ggsave("../Papers/Figures/tissue_comparisons.png", dpi = 300, width = 180, height = 180, units = "mm")
+```
+
+## env figure
+
+```{r}
+func_env_slopes <- qs::qread("functions/env_slopes.qs") |> 
+  mutate(coef_full = case_when(
+      coef_full == "CaMg" ~ "Ion deposition",
+      coef_full == "Nitrogen deposition" ~ "N deposition",
+      coef_full == "Bright sunshine" ~ "Sunshine",
+      .default = coef_full
+    ),
+    prac_sig = ifelse(abs(log2FoldChange) >= 0.1, "1", "0")
+  ) |> 
+  ggplot(aes(x = x, y = 2^pred)) + 
+  geom_line(aes(group = comb, colour = prac_sig), alpha = 0.8) + 
+  scale_colour_discrete(type = c("grey70", "black")) +
+  facet_grid(cols = vars(coef_full), 
+             rows = vars(fct_relevel(Tissue, c("Leaf", "Stem", "Soil"))), 
+             scales = "free_x") +
+  labs(x = NULL, y = "Fold change in GO term abundance") +
+  coord_cartesian(ylim = c(0, 10)) +
+  theme_linedraw() + 
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+((quantile_slopes_plot + labs(title = "Taxonomy")) / (func_env_slopes  + labs(title = "Function"))) +
+  plot_annotation(tag_levels = "a") & 
+  theme(text = element_text(size = 6),
+        title = element_text(size = 7))
+
+ggsave("../Papers/Figures/env_comparisons.png", dpi = 300, width = 180, height = 150, units = "mm")
+```
+
+## maps
+
+```{r}
+its_leaf_asvs <- tar_read(landscape_predictions_theta_ITS_Leaf)
+rrna_stem_asvs <- tar_read(landscape_predictions_theta_16S_Stem)
+rrna_stem_asvs <- tar_read(landscape_predictions_theta_16S_Soil)
+
+map1 <- plot_raster(its_leaf_asvs, tar_read(landscape_df), tar_read(site_df), tar_read(microbiome_tj_corrected_ITS_Leaf), asv_tbl = tar_read(asv_table_ITS_Leaf), 34)
+map2 <- plot_raster(rrna_stem_asvs, tar_read(landscape_df), tar_read(site_df), tar_read(microbiome_tj_corrected_16S_Stem), asv_tbl = tar_read(asv_table_16S_Stem), 726)
+map3 <- plot_raster(rrna_stem_asvs, tar_read(landscape_df), tar_read(site_df), tar_read(microbiome_tj_corrected_16S_Soil), asv_tbl = tar_read(asv_table_16S_Soil), 34)
+```
+
+## disease figure
+
+```{r}
+disease_conts <- qs::qread("functions/disease_contasts.qs") |> 
+  ggplot(aes(y = forcats::fct_reorder(lbl, log2FoldChange, .fun = mean), 
+           x = log2FoldChange, 
+           xmin = (log2FoldChange - ci), 
+           xmax = (log2FoldChange + ci))) +
+  geom_pointrange(size = 0.01, linewidth = 0.5) +
+  geom_vline(xintercept = 0, colour = "grey70", linetype = "dashed") +
+  labs(x = "Fold Change", y = "", colour = "") +
+  theme_linedraw() +
+  theme(legend.position = "bottom")
+
+disease_ord <- qs::qread("functions/disease_ord.qs") |> 
+  ggplot(aes(x = NMDS1, y = NMDS2, fill = Disease)) +
+  geom_point(size = 3, shape = 21) +
+  scale_fill_discrete(type = c(AOD = "indianred2", Asymptomatic = "steelblue2")) +
+  theme_linedraw() +
+  theme(legend.position = "none")
+
+tax_assoc_plot + (richness_comp_plot / free(disease_conts) / disease_ord) +
+  plot_layout(guides = "auto") +
+  plot_annotation(tag_levels = "a") &
+  theme(text = element_text(size = 6),
+        title = element_text(size = 7))
+
+ggsave("../Papers/Figures/disease_comparisons.png", dpi = 300, width = 180, height = 180, units = "mm")
+```
+
+## supplemental figures
+
+host read proportions
+
+```{r}
+ps_organelles <- readRDS("data/16s_microbiome_phyloseq.rds") |> 
+  psmelt() |> 
+  filter(SampleType == "Sample") |> 
+  mutate(
+    Organelle = case_when(Family == "Mitochondria" ~ "Mitochondria",
+                          Order == "Chloroplast" ~ "Plastid",
+                          .default = "Bacteria")
+  ) |> 
+  mutate(Total = sum(Abundance), .by = Sample) |> 
+  summarise(Abundance = sum(Abundance), 
+            Total = unique(Total),
+            Tissue = unique(Tissue),
+            Site = unique(Site),
+            Tree = unique(Tree),
+            .by = c(Sample, Organelle)) |> 
+  mutate(Prop = Abundance / Total)
+
+organelles_plot <- ps_organelles |> 
+  filter(Organelle != "Bacteria") |> 
+  ggplot(aes(x = Tissue, 
+             y = Prop)) +
+  geom_point(aes(colour = Tissue),
+             position = position_jitter()) +
+  scale_colour_discrete(type = c("olivedrab3", "salmon4", "bisque2")) +
+  scale_y_continuous(limits = c(0, 1)) +
+  facet_grid(cols = vars(Organelle)) +
+  labs(x = NULL, 
+       y = "Proportion of reads") +
+  theme_light() + 
+  theme(legend.position = "none")
+
+mg_ids <- tar_read(tree_df) |> 
+  select(Leaf = MG_leaf, Stem = MG_stem, Soil = MG_soil) |> 
+  pivot_longer(cols = everything(), names_to = "Tissue", values_to = "SampleID")
+
+mg_input <- read_tsv(list.files("../Pipeline_outputs/Metagenome_QC/", pattern = "multiqc_fastqc_fastqc_raw.txt", recursive = TRUE, full.names = TRUE), id = "file") |> 
+  mutate(SampleID = str_extract(Sample, "[:alnum:]+")) |> 
+  select(SampleID, Count = `Total Sequences`) |> 
+  summarise(Initial = sum(Count), .by = SampleID)
+
+mg_fastp <- read_tsv(list.files("../Pipeline_outputs/Metagenome_QC/", pattern = "mqc_fastp_filtered_reads_plot_1.txt", recursive = TRUE, full.names = TRUE), id = "file") |> 
+  mutate(SampleID = str_extract(Sample, "[:alnum:]+")) |> 
+  select(SampleID, Count = `Passed Filter`) |> 
+  summarise(FastP = sum(Count) / 2, .by = SampleID)
+
+mg_hostfilter <- read_tsv(list.files("../Pipeline_outputs/Metagenome_QC/", pattern = "multiqc_fastqc_fastqc_trimmed.txt", recursive = TRUE, full.names = TRUE), id = "file") |> 
+  mutate(SampleID = str_extract(Sample, "[:alnum:]+")) |> 
+  select(SampleID, Count = `Total Sequences`) |> 
+  summarise(Nonhost = sum(Count), .by = SampleID)
+
+mg <- left_join(mg_input, mg_fastp) |> 
+  left_join(mg_hostfilter) |> 
+  left_join(mg_ids)
+
+mg_stepplot <- mg |> 
+  pivot_longer(cols = !c(SampleID, Tissue), names_to = "Step", values_to = "Reads") |> 
+  ggplot(aes(x = fct_relevel(Step, c("Initial", "FastP", "Nonhost")))) +
+  stat_lineribbon(aes(y = Reads, fill = after_stat(.width)), .width = ppoints(10)) +
+  facet_grid(rows = vars(Tissue)) +
+  scale_fill_distiller() +
+  labs(x = "Processing stage",
+       y = "Number of reads",
+       fill = "Quantile") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+mg_props <- mg |> 
+  mutate(Prop = Nonhost / FastP) |> 
+  ggplot(aes(x = Tissue, y = 1 - Prop, colour = Tissue)) +
+  geom_point(position = position_jitter()) +
+  scale_colour_discrete(type = c("olivedrab3", "salmon4", "bisque2")) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = NULL, 
+       y = "Proportion of reads") +
+  theme_light() +
+  theme(legend.position = "none")
+
+prop_plot <- organelles_plot + mg_props + 
+  plot_annotation(tag_levels = "a") + 
+  plot_layout(axes = "collect")
+```
+
+Sequencing depth vs size factor value
+
+```{r}
+sf_vs_total <- function(marker, tissue) {
+  ps <- tar_read_raw(glue::glue("microbiome_tj_corrected_{marker}_{tissue}"))
+  sf <- tar_read_raw(glue::glue("model_draws_{marker}_{tissue}")) |> 
+    subset_draws("SF") |> as_draws_rvars() |> pluck("SF")
+  
+  ps <- psmelt(ps) |> 
+    arrange(Site, Tree) |> 
+    summarise(Total = sum(Abundance), .by = c(Site, Tree)) |> 
+    mutate(SF = sf,
+           Marker = marker,
+           Tissue = tissue)
+}
+
+sf_vs_total_df <- map(c("ITS", "16S"), \(x)
+                      map(c("Leaf", "Stem", "Soil"), \(y)
+                          sf_vs_total(x, y))
+                      ) |> list_flatten() |> list_rbind()
+
+sf_vs_total_plot <- ggplot(sf_vs_total_df, aes(x = Total, ydist = SF)) +
+  stat_pointinterval(aes(colour = Tissue)) +
+  scale_x_log10() +
+  scale_colour_discrete(type = c("olivedrab3", "salmon4", "bisque2")) +
+  facet_grid(rows = vars(Marker)) +
+  labs(x = "Total reads sequenced in sample", y = "Model size factor") +
+  theme_light()
+```
+
+dada2 plot
+
+```{r}
+its <- read_tsv("data/its_overall_summary.tsv")
+rrna <- read_tsv("data/16s_overall_summary.tsv")
+
+ps_its_summ <- tar_read(phyloseq_its) |> 
+  psmelt() |> summarise(tax_filter = sum(Abundance), .by = c(Sample, SampleType)) |> 
+  rename(sample = Sample)
+ps_16s_summ <- tar_read(phyloseq_16s) |> 
+  psmelt() |> summarise(tax_filter = sum(Abundance), .by = c(Sample, SampleType)) |> 
+  rename(sample = Sample)
+
+ps_data_summ <- bind_rows(ps_its_summ, ps_16s_summ)
+
+dada2_data <- bind_rows(its, rrna) |> 
+  mutate(Marker = str_extract(sample, "16S|ITS")) |> 
+  select(-cutadapt_passing_filters_percent) |> 
+  left_join(ps_data_summ)
+
+dada2_plot <- dada2_data |> 
+  pivot_longer(cols = !c(Marker, sample, SampleType), names_to = "Stage", values_to = "Reads") |> 
+  filter(!is.na(Reads), SampleType == "Sample") |> 
+  summarise(Reads = rvar(Reads), .by = c(Marker, Stage)) |> 
+  mutate(median = median(Reads), stage_numeric = rep(1:9, times = 2)) |> 
+  ggplot(aes(x = fct_reorder(Stage, stage_numeric))) +
+  stat_lineribbon(aes(ydist = Reads, fill = after_stat(.width), group = Marker), .width = ppoints(10)) +
+  facet_grid(rows = vars(Marker), scales = "free_y") +
+  scale_fill_distiller() +
+  #scale_y_continuous(transform = "log10") +
+  labs(x = "Processing stage",
+       y = "Number of reads",
+       fill = "Quantile") +
+  theme_linedraw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+```
+
+metagenome assembly statistics
+
+```{r}
+assembly_files <- list.files("../Functional_analysis/data/quast", full.names = TRUE)
+assembly_statistics <- map(assembly_files, 
+                           \(x) read_tsv(x, id = "file") |> 
+                             rename(Value = 3)) |> 
+  list_rbind() |> 
+  mutate(AssemblyID = str_extract(file, "\\.\\./Functional_analysis/data/quast/(.*)\\.tsv", group = 1),
+         Tissue = substr(AssemblyID, 1, 4),
+         Site = str_extract(AssemblyID, "([:ALPHA:]+)_", group = 1)) |> 
+  select(Site, Tissue, Assembly, Value) |> 
+  filter(Assembly %in% c("# contigs", 
+                         "Largest contig",
+                         "Total length",
+                         "N50",
+                         "L50",
+                         "GC (%)",
+                         "# predicted rRNA genes")) |> 
+  rowwise() |> 
+  mutate(Sample = glue::glue("{Tissue}_{Site}"),
+                             temp = str_replace(Value, " part", ""), 
+                             Value = eval(parse(text = temp))
+         )
+
+assembly_stats_plot <- ggplot(assembly_statistics, aes(x = Tissue, 
+                                y = Value, 
+                                colour = Tissue)) +
+  geom_point(position = position_jitter(width = 0.3)) +
+  facet_grid(rows = vars(Assembly), scales = "free") +
+  labs(y = NULL)+
+  theme_light() +
+  theme(legend.position = "none")
+```

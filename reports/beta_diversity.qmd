@@ -1,0 +1,124 @@
+---
+author: Jim Downie
+title: Ordination
+project:
+  execute-dir: project
+  default-image-extension: svg
+format: 
+  html:
+    fig-width: 12
+    fig-height: 12
+    fig-format: svg
+    embed-resources: true
+---
+
+```{r load libraries}
+#| include: false
+library(targets)
+library(tidyverse)
+library(phyloseq)
+library(microViz)
+```
+
+```{r load data}
+#| include: false
+remove_zero_counts <- function(ps) {
+  prune_samples(sample_sums(ps) != 0, ps)
+}
+
+ps_its <- tar_read(phyloseq_its) |>
+  remove_zero_counts()
+tax_table(ps_its) <- tax_table(ps_its)[,1:7]
+ps_16s <- tar_read(phyloseq_16s) |>
+  remove_zero_counts()
+tax_table(ps_16s) <- tax_table(ps_16s)[,1:7]
+```
+
+```{r themes}
+#| include: false
+
+## Set a few global plot options:
+point_size <- 12
+theme_plots <- theme(legend.position = "bottom", legend.box = "vertical", 
+                     axis.text = element_text(size = 12),
+                     axis.title = element_text(size = 20),
+                     legend.title = element_text(size = 20),
+                     legend.text = element_text(size = 18),
+                     strip.text = element_text(size = 14))
+centre_long_legend <- theme(legend.key.width = unit(4, "cm"), 
+                            legend.text = element_text(angle = 45),
+                            legend.justification = "center")
+```
+
+## Ordination
+
+```{r full_ord}
+#| echo: false
+#| include: false
+
+its_ordination <- ordinate(
+  ps_its, 
+  method = "NMDS", 
+  distance = "horn"
+)
+
+rrna_ordination <- ordinate(
+  ps_16s, 
+  method = "NMDS", 
+  distance = "horn"
+)
+```
+
+### ITS
+
+```{r}
+#| echo: false
+
+plot_ordination(ps_its, its_ordination, justDF = TRUE) |> 
+  ggplot(aes(x = NMDS1, y = NMDS2, fill = Tissue)) +
+  geom_point(aes(fill = Tissue), shape = 21, size = 3) +
+  scale_fill_manual(values = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  coord_fixed() +
+  theme_bw() +
+  theme_plots
+```
+
+### 16S
+
+```{r}
+#| echo: false
+
+plot_ordination(ps_16s, rrna_ordination, justDF = TRUE) |> 
+  ggplot(aes(x = NMDS1, y = NMDS2, fill = Tissue)) +
+  geom_point(aes(fill = Tissue), shape = 21, size = 3) +
+  scale_fill_manual(values = c(Leaf = "olivedrab3", Stem = "bisque2", Soil = "salmon4")) +
+  coord_fixed() +
+  theme_bw() +
+  theme_plots
+```
+
+### By disease
+
+#### ITS
+
+```{r}
+#| echo: false
+
+plot_ordination(ps_its, its_ordination, justDF = TRUE) |> 
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = Disease), shape = 21, size = 2) +
+  facet_grid(cols = vars(Tissue), scales = "free") +
+  theme_bw()
+```
+
+#### 16S
+
+```{r}
+#| echo: false
+
+plot_ordination(ps_16s, rrna_ordination, justDF = TRUE) |> 
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = Disease), shape = 21, size = 2) +
+  facet_grid(cols = vars(Tissue), scales = "free") +
+  theme_bw()
+```
